@@ -1,650 +1,497 @@
 # app/routes/document_routes.py
+import traceback
+import uuid
 import os
 import hashlib
-import traceback
+import json
+from shutil import copyfileobj
+from typing import List, Optional
+
 import aiofiles
 import aiofiles.os
-from shutil import copyfileobj
-from typing import List, Iterable
-from fastapi import (
-    APIRouter,
-    Request,
-    UploadFile,
-    HTTPException,
-    File,
-    Form,
-    Body,
-    Query,
-    status,
-)
-from langchain_core.documents import Document
-from langchain_core.runnables import run_in_executor
+from fastapi import APIRouter, HTTPException, Query, Request, Body, File, UploadFile, Form, status
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from functools import lru_cache
 
-from app.config import logger, vector_store, RAG_UPLOAD_DIR, CHUNK_SIZE, CHUNK_OVERLAP
-from app.constants import ERROR_MESSAGES
+from app.config import RAG_UPLOAD_DIR, logger, VECTOR_DB_TYPE, VectorDBType, vector_store
 from app.models import (
-    StoreDocument,
-    QueryRequestBody,
-    DocumentResponse,
-    QueryMultipleBody,
+    DocumentResponse, DocumentCreate, DocumentUpdate, DocumentUploadRequest,
+    PaginatedResponse, SuccessResponse
 )
-from app.services.vector_store.async_pg_vector import AsyncPgVector
-from app.utils.document_loader import (
-    get_loader,
-    clean_text,
-    process_documents,
-    cleanup_temp_encoding_file,
+from app.services.database import (
+    get_all_documents,
+    get_documents_by_collection,
+    get_document_by_idx,
+    get_document_by_serial_id,
+    create_document,
+    update_document,
+    delete_document,
+    create_embedding
 )
-from app.utils.health import is_health_ok
+from app.utils.document_loader import get_loader, cleanup_temp_encoding_file
 
-router = APIRouter()
-
-
-@router.get("/ids")
-async def get_all_ids(request: Request):
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            ids = await vector_store.get_all_ids(executor=request.app.state.thread_pool)
-        else:
-            ids = vector_store.get_all_ids()
-
-        return list(set(ids))
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in get_all_ids | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Failed to get all IDs | Error: %s | Traceback: %s",
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=str(e))
+router = APIRouter(prefix="/documents", tags=["Documents"])
 
 
-@router.get("/health")
-async def health_check():
-    try:
-        if await is_health_ok():
-            return {"status": "UP"}
-        else:
-            logger.error("Health check failed")
-            return {"status": "DOWN"}, 503
-    except Exception as e:
-        logger.error(
-            "Error during health check | Error: %s | Traceback: %s",
-            str(e),
-            traceback.format_exc(),
-        )
-        return {"status": "DOWN", "error": str(e)}, 503
-
-
-@router.get("/documents", response_model=list[DocumentResponse])
-async def get_documents_by_ids(request: Request, ids: list[str] = Query(...)):
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
-                ids, executor=request.app.state.thread_pool
-            )
-            documents = await vector_store.get_documents_by_ids(
-                ids, executor=request.app.state.thread_pool
-            )
-        else:
-            existing_ids = vector_store.get_filtered_ids(ids)
-            documents = vector_store.get_documents_by_ids(ids)
-
-        # Ensure all requested ids exist
-        if not all(id in existing_ids for id in ids):
-            raise HTTPException(status_code=404, detail="One or more IDs not found")
-
-        # Ensure documents list is not empty
-        if not documents:
-            raise HTTPException(
-                status_code=404, detail="No documents found for the given IDs"
-            )
-
-        return documents
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in get_documents_by_ids | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Error getting documents by IDs | IDs: %s | Error: %s | Traceback: %s",
-            ids,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/documents")
-async def delete_documents(request: Request, document_ids: List[str] = Body(...)):
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
-                document_ids, executor=request.app.state.thread_pool
-            )
-            await vector_store.delete(
-                ids=document_ids, executor=request.app.state.thread_pool
-            )
-        else:
-            existing_ids = vector_store.get_filtered_ids(document_ids)
-            vector_store.delete(ids=document_ids)
-
-        if not all(id in existing_ids for id in document_ids):
-            raise HTTPException(status_code=404, detail="One or more IDs not found")
-
-        file_count = len(document_ids)
-        return {
-            "message": f"Documents for {file_count} file{'s' if file_count > 1 else ''} deleted successfully"
-        }
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in delete_documents | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Failed to delete documents | IDs: %s | Error: %s | Traceback: %s",
-            document_ids,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Cache the embedding function with LRU cache
-@lru_cache(maxsize=128)
-def get_cached_query_embedding(query: str):
-    return vector_store.embedding_function.embed_query(query)
-
-
-@router.post("/query")
-async def query_embeddings_by_file_id(
-    body: QueryRequestBody,
-    request: Request,
-):
-    if not hasattr(request.state, "user"):
-        user_authorized = body.entity_id if body.entity_id else "public"
-    else:
-        user_authorized = (
-            body.entity_id if body.entity_id else request.state.user.get("id")
-        )
-
-    authorized_documents = []
-
-    try:
-        embedding = get_cached_query_embedding(body.query)
-
-        if isinstance(vector_store, AsyncPgVector):
-            documents = await vector_store.asimilarity_search_with_score_by_vector(
-                embedding,
-                k=body.k,
-                filter={"file_id": body.file_id},
-                executor=request.app.state.thread_pool,
-            )
-        else:
-            documents = vector_store.similarity_search_with_score_by_vector(
-                embedding, k=body.k, filter={"file_id": body.file_id}
-            )
-
-        if not documents:
-            return authorized_documents
-
-        document, score = documents[0]
-        doc_metadata = document.metadata
-        doc_user_id = doc_metadata.get("user_id")
-
-        if doc_user_id is None or doc_user_id == user_authorized:
-            authorized_documents = documents
-        else:
-            # If using entity_id and access denied, try again with user's actual ID
-            if body.entity_id and hasattr(request.state, "user"):
-                user_authorized = request.state.user.get("id")
-                if doc_user_id == user_authorized:
-                    authorized_documents = documents
-                else:
-                    if body.entity_id == doc_user_id:
-                        logger.warning(
-                            f"Entity ID {body.entity_id} matches document user_id but user {user_authorized} is not authorized"
-                        )
-                    else:
-                        logger.warning(
-                            f"Access denied for both entity ID {body.entity_id} and user {user_authorized} to document with user_id {doc_user_id}"
-                        )
-            else:
-                logger.warning(
-                    f"Unauthorized access attempt by user {user_authorized} to a document with user_id {doc_user_id}"
-                )
-
-        return authorized_documents
-
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in query_embeddings_by_file_id | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Error in query embeddings | File ID: %s | Query: %s | Error: %s | Traceback: %s",
-            body.file_id,
-            body.query,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def generate_digest(page_content: str):
-    hash_obj = hashlib.md5(page_content.encode())
-    return hash_obj.hexdigest()
-
-
-async def store_data_in_vector_db(
-    data: Iterable[Document],
-    file_id: str,
-    user_id: str = "",
-    clean_content: bool = False,
-    executor=None,
-) -> bool:
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
-    )
-    documents = text_splitter.split_documents(data)
-
-    # If `clean_content` is True, clean the page_content of each document (remove null bytes)
-    if clean_content:
-        for doc in documents:
-            doc.page_content = clean_text(doc.page_content)
-
-    # Preparing documents with page content and metadata for insertion.
-    docs = [
-        Document(
-            page_content=doc.page_content,
-            metadata={
-                "file_id": file_id,
-                "user_id": user_id,
-                "digest": generate_digest(doc.page_content),
-                **(doc.metadata or {}),
-            },
-        )
-        for doc in documents
-    ]
-
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            ids = await vector_store.aadd_documents(
-                docs, ids=[file_id] * len(documents), executor=executor
-            )
-        else:
-            ids = vector_store.add_documents(docs, ids=[file_id] * len(documents))
-
-        return {"message": "Documents added successfully", "ids": ids}
-
-    except Exception as e:
-        logger.error(
-            "Failed to store data in vector DB | File ID: %s | User ID: %s | Error: %s | Traceback: %s",
-            file_id,
-            user_id,
-            str(e),
-            traceback.format_exc(),
-        )
-        return {"message": "An error occurred while adding documents.", "error": str(e)}
-
-
-@router.post("/local/embed")
-async def embed_local_file(
-    document: StoreDocument, request: Request, entity_id: str = None
-):
-    # Check if the file exists
-    if not os.path.exists(document.filepath):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.FILE_NOT_FOUND,
-        )
-
-    if not hasattr(request.state, "user"):
-        user_id = entity_id if entity_id else "public"
-    else:
-        user_id = entity_id if entity_id else request.state.user.get("id")
-
-    try:
-        loader, known_type, file_ext = get_loader(
-            document.filename, document.file_content_type, document.filepath
-        )
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
-
-        # Clean up temporary UTF-8 file if it was created for encoding conversion
-        cleanup_temp_encoding_file(loader)
-
-        result = await store_data_in_vector_db(
-            data,
-            document.file_id,
-            user_id,
-            clean_content=file_ext == "pdf",
-            executor=request.app.state.thread_pool,
-        )
-
-        if result:
-            return {
-                "status": True,
-                "file_id": document.file_id,
-                "filename": document.filename,
-                "known_type": known_type,
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT(),
-            )
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in embed_local_file | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(e)
-        if "No pandoc was found" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.PANDOC_NOT_INSTALLED,
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT(e),
-            )
-
-
-@router.post("/embed")
-async def embed_file(
-    request: Request,
-    file_id: str = Form(...),
-    file: UploadFile = File(...),
-    entity_id: str = Form(None),
-):
-    response_status = True
-    response_message = "File processed successfully."
-    known_type = None
-    if not hasattr(request.state, "user"):
-        user_id = entity_id if entity_id else "public"
-    else:
-        user_id = entity_id if entity_id else request.state.user.get("id")
-
-    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id)
-    os.makedirs(temp_base_path, exist_ok=True)
-    temp_file_path = os.path.join(RAG_UPLOAD_DIR, user_id, file.filename)
-
-    try:
-        async with aiofiles.open(temp_file_path, "wb") as temp_file:
-            chunk_size = 64 * 1024  # 64 KB
-            while content := await file.read(chunk_size):
-                await temp_file.write(content)
-    except Exception as e:
-        logger.error(
-            "Failed to save uploaded file | Path: %s | Error: %s | Traceback: %s",
-            temp_file_path,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save the uploaded file. Error: {str(e)}",
-        )
-
-    try:
-        loader, known_type, file_ext = get_loader(
-            file.filename, file.content_type, temp_file_path
-        )
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
-
-        # Clean up temporary UTF-8 file if it was created for encoding conversion
-        cleanup_temp_encoding_file(loader)
-
-        result = await store_data_in_vector_db(
-            data=data,
-            file_id=file_id,
-            user_id=user_id,
-            clean_content=file_ext == "pdf",
-            executor=request.app.state.thread_pool,
-        )
-
-        if not result:
-            response_status = False
-            response_message = "Failed to process/store the file data."
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to process/store the file data.",
-            )
-        elif "error" in result:
-            response_status = False
-            response_message = "Failed to process/store the file data."
-            if isinstance(result["error"], str):
-                response_message = result["error"]
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="An unspecified error occurred.",
-                )
-    except HTTPException as http_exc:
-        response_status = False
-        response_message = f"HTTP Exception: {http_exc.detail}"
-        logger.error(
-            "HTTP Exception in embed_file | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        response_status = False
-        response_message = f"Error during file processing: {str(e)}"
-        logger.error(
-            "Error during file processing: %s\nTraceback: %s",
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error during file processing: {str(e)}",
-        )
-    finally:
+def parse_metadata(metadata_value):
+    """Helper function to parse metadata from database (could be string or dict)."""
+    if isinstance(metadata_value, str):
         try:
-            await aiofiles.os.remove(temp_file_path)
-        except Exception as e:
-            logger.error(
-                "Failed to remove temporary file | Path: %s | Error: %s | Traceback: %s",
-                temp_file_path,
-                str(e),
-                traceback.format_exc(),
-            )
-
-    return {
-        "status": response_status,
-        "message": response_message,
-        "file_id": file_id,
-        "filename": file.filename,
-        "known_type": known_type,
-    }
-
-
-@router.get("/documents/{id}/context")
-async def load_document_context(request: Request, id: str):
-    ids = [id]
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
-                ids, executor=request.app.state.thread_pool
-            )
-            documents = await vector_store.get_documents_by_ids(
-                ids, executor=request.app.state.thread_pool
-            )
-        else:
-            existing_ids = vector_store.get_filtered_ids(ids)
-            documents = vector_store.get_documents_by_ids(ids)
-
-        # Ensure the requested id exists
-        if not all(id in existing_ids for id in ids):
-            raise HTTPException(
-                status_code=404, detail="The specified file_id was not found"
-            )
-
-        # Ensure documents list is not empty
-        if not documents:
-            raise HTTPException(
-                status_code=404, detail="No document found for the given ID"
-            )
-
-        return process_documents(documents)
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in load_document_context | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Error loading document context | Document ID: %s | Error: %s | Traceback: %s",
-            id,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
-
-
-@router.post("/embed-upload")
-async def embed_file_upload(
-    request: Request,
-    file_id: str = Form(...),
-    uploaded_file: UploadFile = File(...),
-    entity_id: str = Form(None),
-):
-    temp_file_path = os.path.join(RAG_UPLOAD_DIR, uploaded_file.filename)
-
-    if not hasattr(request.state, "user"):
-        user_id = entity_id if entity_id else "public"
+            return json.loads(metadata_value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    elif isinstance(metadata_value, dict):
+        return metadata_value
     else:
-        user_id = entity_id if entity_id else request.state.user.get("id")
+        return {}
 
+
+async def create_document_embeddings(document_id: str, content: str, request: Request = None):
+    """Create embeddings for document content using the configured vector store."""
     try:
-        with open(temp_file_path, "wb") as temp_file:
-            copyfileobj(uploaded_file.file, temp_file)
+        if not content:
+            return 0
+            
+        # Split content into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+        )
+        chunks = text_splitter.split_text(content)
+        
+        created_count = 0
+        for i, chunk_text in enumerate(chunks):
+            try:
+                if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
+                    # Use database-only approach for PG Vector
+                    custom_id = f"{document_id}_chunk_{i}"
+                    from app.config import embeddings
+                    embedding_vector = embeddings.embed_query(chunk_text)
+                    
+                    await create_embedding(
+                        custom_id=custom_id,
+                        embedding=embedding_vector,
+                        document_text=chunk_text,
+                        document_id=document_id,
+                        metadata={
+                            "chunk_index": i,
+                            "chunk_size": len(chunk_text),
+                            "total_chunks": len(chunks)
+                        }
+                    )
+                elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
+                    # Use vector store approach for Atlas Mongo
+                    from langchain_core.documents import Document
+                    from app.services.vector_store.async_pg_vector import AsyncPgVector
+                    
+                    doc = Document(
+                        page_content=chunk_text, 
+                        metadata={
+                            "document_id": document_id,
+                            "chunk_index": i,
+                            "chunk_size": len(chunk_text),
+                            "total_chunks": len(chunks)
+                        }
+                    )
+                    
+                    if isinstance(vector_store, AsyncPgVector):
+                        await vector_store.aadd_documents([doc], executor=request.app.state.thread_pool if request else None)
+                    else:
+                        vector_store.add_documents([doc])
+                
+                created_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to create embedding for chunk {i} of document {document_id}: {str(e)}")
+                
+        return created_count
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save the uploaded file. Error: {str(e)}",
-        )
+        logger.error(f"Failed to create document embeddings | Document ID: {document_id} | Error: {str(e)}")
+        return 0
 
+
+@router.get("/", response_model=PaginatedResponse)
+async def list_documents(
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    file_id: Optional[str] = Query(None, description="Filter by file ID"),
+    collection_id: Optional[str] = Query(None, description="Filter by collection ID")
+):
+    """List documents with pagination and filtering."""
     try:
-        loader, known_type, file_ext = get_loader(
-            uploaded_file.filename, uploaded_file.content_type, temp_file_path
-        )
-
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
-
-        # Clean up temporary UTF-8 file if it was created for encoding conversion
-        cleanup_temp_encoding_file(loader)
-
-        result = await store_data_in_vector_db(
-            data,
-            file_id,
-            user_id,
-            clean_content=file_ext == "pdf",
-            executor=request.app.state.thread_pool,
-        )
-
-        if not result:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to process/store the file data.",
+        offset = (page - 1) * page_size
+        
+        if collection_id:
+            documents, total = await get_documents_by_collection(
+                collection_id, limit=page_size, offset=offset
             )
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in embed_file_upload | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
-        )
-        raise http_exc
-    except Exception as e:
-        logger.error(
-            "Error during file processing | File: %s | Error: %s | Traceback: %s",
-            uploaded_file.filename,
-            str(e),
-            traceback.format_exc(),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error during file processing: {str(e)}",
-        )
-    finally:
-        os.remove(temp_file_path)
-
-    return {
-        "status": True,
-        "message": "File processed successfully.",
-        "file_id": file_id,
-        "filename": uploaded_file.filename,
-        "known_type": known_type,
-    }
-
-
-@router.post("/query_multiple")
-async def query_embeddings_by_file_ids(request: Request, body: QueryMultipleBody):
-    try:
-        # Get the embedding of the query text
-        embedding = get_cached_query_embedding(body.query)
-
-        # Perform similarity search with the query embedding and filter by the file_ids in metadata
-        if isinstance(vector_store, AsyncPgVector):
-            documents = await vector_store.asimilarity_search_with_score_by_vector(
-                embedding,
-                k=body.k,
-                filter={"file_id": {"$in": body.file_ids}},
-                executor=request.app.state.thread_pool,
-            )
+            if documents is None:
+                raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
         else:
-            documents = vector_store.similarity_search_with_score_by_vector(
-                embedding, k=body.k, filter={"file_id": {"$in": body.file_ids}}
+            documents, total = await get_all_documents(
+                limit=page_size, offset=offset, user_id=user_id, file_id=file_id
             )
+        
+        # Convert to response format
+        response_items = []
+        for doc in documents:
+            response_items.append(DocumentResponse(
+                serial_id=str(doc['serial_id']),
+                idx=doc.get('idx'),
+                filename=doc.get('filename', ''),
+                content=doc.get('content'),
+                page_content=doc.get('page_content'),
+                mimetype=doc.get('mimetype'),
+                binary_hash=doc.get('binary_hash'),
+                description=doc.get('description'),
+                keywords=doc.get('keywords'),
+                page_number=doc.get('page_number'),
+                pdf_path=doc.get('pdf_path'),
+                collection_id=str(doc.get('collection_id')) if doc.get('collection_id') else None,
+                collection_name=doc.get('collection_name'),
+                metadata=parse_metadata(doc.get('metadata')),
+                created_at=doc.get('created_at'),
+                updated_at=doc.get('updated_at')
+            ))
 
-        # Ensure documents list is not empty
-        if not documents:
-            raise HTTPException(
-                status_code=404, detail="No documents found for the given query"
-            )
-
-        return documents
-    except HTTPException as http_exc:
-        logger.error(
-            "HTTP Exception in query_embeddings_by_file_ids | Status: %d | Detail: %s",
-            http_exc.status_code,
-            http_exc.detail,
+        total_pages = (total + page_size - 1) // page_size
+        
+        return PaginatedResponse(
+            items=response_items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1
         )
-        raise http_exc
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(
-            "Error in query multiple embeddings | File IDs: %s | Query: %s | Error: %s | Traceback: %s",
-            body.file_ids,
-            body.query,
-            str(e),
-            traceback.format_exc(),
+        logger.error(f"Failed to list documents | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+@router.post("/", response_model=DocumentResponse)
+async def create_document_endpoint(
+    request: Request,
+    document: DocumentCreate
+):
+    """Create a new document."""
+    try:
+        # Generate a unique ID for the document
+        document_id = str(uuid.uuid4())
+        
+        # Create document in database
+        created_doc = await create_document(
+            idx=document.idx,
+            collection_id=document.collection_id,
+            filename=document.filename,
+            content=document.content,
+            page_content=document.page_content,
+            mimetype=document.mimetype,
+            description=document.description,
+            keywords=document.keywords,
+            page_number=document.page_number,
+            pdf_path=document.pdf_path,
+            metadata=document.metadata or {}
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        
+        if not created_doc:
+            raise HTTPException(status_code=500, detail="Failed to create document in database")
+        
+        return DocumentResponse(
+            serial_id=str(created_doc['serial_id']),
+            idx=created_doc.get('idx'),
+            filename=created_doc.get('filename', ''),
+            content=created_doc.get('content'),
+            page_content=created_doc.get('page_content'),
+            mimetype=created_doc.get('mimetype'),
+            binary_hash=created_doc.get('binary_hash'),
+            description=created_doc.get('description'),
+            keywords=created_doc.get('keywords'),
+            page_number=created_doc.get('page_number'),
+            pdf_path=created_doc.get('pdf_path'),
+            collection_id=str(created_doc.get('collection_id')) if created_doc.get('collection_id') else None,
+            collection_name=created_doc.get('collection_name'),
+            metadata=parse_metadata(created_doc.get('metadata')),
+            created_at=created_doc.get('created_at'),
+            updated_at=created_doc.get('updated_at')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create document | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to create document: {str(e)}")
+
+
+@router.post("/upload", response_model=DocumentResponse)
+async def create_document_with_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    collection_id: Optional[str] = Form(None),
+    idx: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    keywords: Optional[str] = Form(None),
+    create_embeddings: bool = Form(True)
+):
+    """Create a new document by uploading a file with optional embedding generation."""
+    try:
+        # Generate unique ID for the document
+        document_id = str(uuid.uuid4())
+        
+        # Read file content
+        file_content = await file.read()
+        file_hash = hashlib.md5(file_content).hexdigest()
+        
+        # Save file temporarily for processing
+        temp_file_path = os.path.join(RAG_UPLOAD_DIR, f"{document_id}_{file.filename}")
+        
+        try:
+            async with aiofiles.open(temp_file_path, 'wb') as f:
+                await f.write(file_content)
+            
+            # Get loader for the file type
+            loader, known_type, file_ext = get_loader(
+                file.filename, file.content_type, temp_file_path
+            )
+            
+            # Load document data
+            from langchain_core.runnables import run_in_executor
+            data = await run_in_executor(request.app.state.thread_pool, loader.load)
+            
+            # Clean up temporary UTF-8 file if it was created
+            cleanup_temp_encoding_file(loader)
+            
+            # Extract content from loaded data
+            full_content = ""
+            page_content = ""
+            if data:
+                full_content = "\n".join([doc.page_content for doc in data])
+                page_content = data[0].page_content if data else ""
+            
+            # Create document in database
+            created_doc = await create_document(
+                idx=idx or document_id,
+                collection_id=collection_id,
+                filename=file.filename,
+                content=full_content,
+                page_content=page_content,
+                mimetype=file.content_type,
+                description=description,
+                save_pdf_path=(file_ext == "pdf"),
+                keywords=keywords,
+                pdf_path=temp_file_path if file_ext == "pdf" else None,
+                metadata=json.dumps({"file_size": len(file_content), "file_ext": file_ext})
+            )
+            
+            if not created_doc:
+                raise HTTPException(status_code=500, detail="Failed to create document in database")
+            
+            # Create embeddings if requested
+            if create_embeddings and full_content:
+                try:
+                    created_count = await create_document_embeddings(document_id, full_content, request)
+                    logger.info(f"Created {created_count} embeddings for document {document_id}")
+                except Exception as embed_error:
+                    logger.warning(f"Failed to create embeddings for document {document_id}: {embed_error}")
+                    # Don't fail the whole operation if embedding creation fails
+            
+            return DocumentResponse(
+                serial_id=str(created_doc['serial_id']),
+                idx=created_doc.get('idx'),
+                filename=created_doc.get('filename', ''),
+                content=created_doc.get('content'),
+                page_content=created_doc.get('page_content'),
+                mimetype=created_doc.get('mimetype'),
+                binary_hash=created_doc.get('binary_hash'),
+                description=created_doc.get('description'),
+                keywords=created_doc.get('keywords'),
+                page_number=created_doc.get('page_number'),
+                pdf_path=created_doc.get('pdf_path'),
+                collection_id=str(created_doc.get('collection_id')) if created_doc.get('collection_id') else None,
+                collection_name=created_doc.get('collection_name'),
+                metadata=parse_metadata(created_doc.get('metadata')),
+                created_at=created_doc.get('created_at'),
+                updated_at=created_doc.get('updated_at')
+            )
+            
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(temp_file_path):
+                    await aiofiles.os.remove(temp_file_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temporary file {temp_file_path}: {cleanup_error}")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create document with upload | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to create document with upload: {str(e)}")
+
+
+@router.get("/{document_id}", response_model=DocumentResponse)
+async def get_document_endpoint(document_id: str, request: Request):
+    """Get a specific document by ID."""
+    try:
+        # Try to parse as UUID first (serial_id), if it fails, treat as idx
+        try:
+            uuid.UUID(document_id)
+            # It's a valid UUID, so it's a serial_id
+            doc = await get_document_by_serial_id(document_id)
+        except ValueError:
+            # It's not a UUID, so it's an idx
+            doc = await get_document_by_idx(document_id)
+        
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        return DocumentResponse(
+            serial_id=str(doc['serial_id']),
+            idx=doc.get('idx'),
+            filename=doc.get('filename', ''),
+            content=doc.get('content'),
+            page_content=doc.get('page_content'),
+            mimetype=doc.get('mimetype'),
+            binary_hash=doc.get('binary_hash'),
+            description=doc.get('description'),
+            keywords=doc.get('keywords'),
+            page_number=doc.get('page_number'),
+            pdf_path=doc.get('pdf_path'),
+            collection_id=str(doc.get('collection_id')) if doc.get('collection_id') else None,
+            collection_name=doc.get('collection_name'),
+            metadata=parse_metadata(doc.get('metadata')),
+            created_at=doc.get('created_at'),
+            updated_at=doc.get('updated_at')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document | ID: {document_id} | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document: {str(e)}")
+
+
+@router.put("/{document_id}", response_model=DocumentResponse)
+async def update_document_endpoint(
+    document_id: str,
+    document_update: DocumentUpdate,
+    request: Request
+):
+    """Update a document."""
+    try:
+        # Build update parameters from the DocumentUpdate model
+        update_params = {}
+        
+        if document_update.filename is not None:
+            update_params['filename'] = document_update.filename
+        if document_update.content is not None:
+            update_params['content'] = document_update.content
+        if document_update.page_content is not None:
+            update_params['page_content'] = document_update.page_content
+        if document_update.description is not None:
+            update_params['description'] = document_update.description
+        if document_update.keywords is not None:
+            update_params['keywords'] = document_update.keywords
+        if document_update.metadata is not None:
+            # Convert metadata to JSON string for database storage
+            update_params['metadata'] = json.dumps(document_update.metadata)
+        
+        # Try to parse as UUID first (serial_id), if it fails, treat as idx
+        try:
+            uuid.UUID(document_id)
+            # For serial_id, we need to get the idx first, then update by idx
+            doc = await get_document_by_serial_id(document_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail="Document not found")
+            document_idx = doc['idx']
+        except ValueError:
+            # It's an idx
+            document_idx = document_id
+        
+        # Update document in database
+        updated_doc = await update_document(document_idx, **update_params)
+        
+        if not updated_doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        return DocumentResponse(
+            serial_id=str(updated_doc['serial_id']),
+            idx=updated_doc.get('idx'),
+            filename=updated_doc.get('filename', ''),
+            content=updated_doc.get('content'),
+            page_content=updated_doc.get('page_content'),
+            mimetype=updated_doc.get('mimetype'),
+            binary_hash=updated_doc.get('binary_hash'),
+            description=updated_doc.get('description'),
+            keywords=updated_doc.get('keywords'),
+            page_number=updated_doc.get('page_number'),
+            pdf_path=updated_doc.get('pdf_path'),
+            collection_id=str(updated_doc.get('collection_id')) if updated_doc.get('collection_id') else None,
+            collection_name=updated_doc.get('collection_name'),
+            metadata=parse_metadata(updated_doc.get('metadata', {})),
+            created_at=updated_doc.get('created_at'),
+            updated_at=updated_doc.get('updated_at')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update document | ID: {document_id} | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to update document: {str(e)}")
+
+
+@router.delete("/{document_id}", response_model=SuccessResponse)
+async def delete_document_endpoint(document_id: str, request: Request):
+    """Delete a specific document."""
+    try:
+        # Delete document and associated embeddings from database
+        success = await delete_document(document_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        return SuccessResponse(message=f"Document {document_id} deleted successfully")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete document | ID: {document_id} | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
+
+@router.delete("/", response_model=SuccessResponse)
+async def delete_documents(request: Request, document_ids: List[str] = Body(...)):
+    """Delete multiple documents."""
+    try:
+        deleted_count = 0
+        failed_ids = []
+        
+        for doc_id in document_ids:
+            success = await delete_document(doc_id)
+            if success:
+                deleted_count += 1
+            else:
+                failed_ids.append(doc_id)
+        
+        if failed_ids:
+            logger.warning(f"Failed to delete documents: {failed_ids}")
+        
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="No documents found to delete")
+
+        message = f"Successfully deleted {deleted_count} document{'s' if deleted_count > 1 else ''}"
+        if failed_ids:
+            message += f". Failed to delete {len(failed_ids)} document{'s' if len(failed_ids) > 1 else ''}"
+            
+        return SuccessResponse(message=message)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete documents | IDs: {document_ids} | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete documents: {str(e)}")

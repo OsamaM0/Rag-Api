@@ -22,7 +22,15 @@ from app.config import (
     logger,
 )
 from app.middleware import security_middleware
-from app.routes import document_routes, pgvector_routes
+from app.routes import (
+    document_routes, 
+    pgvector_routes, 
+    collection_routes,
+    query_routes,
+    embedding_routes,
+    database_routes,
+    health_routes
+)
 from app.services.database import PSQLDatabase, ensure_vector_indexes
 
 
@@ -52,7 +60,21 @@ async def lifespan(app: FastAPI):
     logger.info("Thread pool shutdown complete")
 
 
-app = FastAPI(lifespan=lifespan, debug=debug_mode)
+app = FastAPI(
+    title="RAG API Server",
+    description="A comprehensive RAG (Retrieval-Augmented Generation) API with document management, embeddings, and vector search capabilities",
+    version="1.0.0",
+    lifespan=lifespan, 
+    debug=debug_mode,
+    contact={
+        "name": "RAG API Support",
+        "email": "support@ragapi.com",
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT",
+    }
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,8 +93,26 @@ app.state.CHUNK_SIZE = CHUNK_SIZE
 app.state.CHUNK_OVERLAP = CHUNK_OVERLAP
 app.state.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
 
-# Include routers
+# Include routers with organized groups
+# System Health
+app.include_router(health_routes.router)
+
+# Collections - CRUD operations for document collections
+app.include_router(collection_routes.router)
+
+# Documents - File upload, processing, and document management
 app.include_router(document_routes.router)
+
+# Embeddings - Vector embedding operations
+app.include_router(embedding_routes.router)
+
+# Queries - Search and retrieval operations
+app.include_router(query_routes.router)
+
+# Database - Database management and maintenance
+app.include_router(database_routes.router)
+
+# PgVector - Advanced PostgreSQL vector operations (debug mode only)
 if debug_mode:
     app.include_router(router=pgvector_routes.router)
 
