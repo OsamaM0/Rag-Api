@@ -31,6 +31,7 @@ async def ensure_three_table_schema():
                 uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 serial_id SERIAL UNIQUE,
                 idx VARCHAR UNIQUE,
+                custom_id VARCHAR UNIQUE,
                 name VARCHAR NOT NULL,
                 description TEXT,
                 cmetadata JSONB DEFAULT '{}',
@@ -44,6 +45,7 @@ async def ensure_three_table_schema():
             ALTER TABLE langchain_pg_collection 
             ADD COLUMN IF NOT EXISTS serial_id SERIAL UNIQUE,
             ADD COLUMN IF NOT EXISTS idx VARCHAR UNIQUE,
+            ADD COLUMN IF NOT EXISTS custom_id VARCHAR UNIQUE,
             ADD COLUMN IF NOT EXISTS description TEXT,
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
@@ -61,6 +63,7 @@ async def ensure_three_table_schema():
             CREATE TABLE IF NOT EXISTS documents (
                 serial_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 idx VARCHAR UNIQUE,
+                custom_id VARCHAR UNIQUE,
                 filename VARCHAR NOT NULL,
                 content TEXT,
                 page_content TEXT,  -- For vector search chunks
@@ -108,6 +111,12 @@ async def ensure_three_table_schema():
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
         """)
         
+        # Add missing columns to documents table if they don't exist
+        await conn.execute("""
+            ALTER TABLE documents 
+            ADD COLUMN IF NOT EXISTS custom_id VARCHAR UNIQUE;
+        """)
+        
         # Add foreign key constraints if they don't exist (after all tables are created)
         try:
             # Check if collection foreign key exists
@@ -145,10 +154,12 @@ async def ensure_three_table_schema():
         indexes_to_create = [
             # Collection indexes
             ("idx_collections_idx", "langchain_pg_collection", "idx"),
+            ("idx_collections_custom_id", "langchain_pg_collection", "custom_id"),
             ("idx_collections_name", "langchain_pg_collection", "name"),
             
             # Document indexes
             ("idx_documents_idx", "documents", "idx"),
+            ("idx_documents_custom_id", "documents", "custom_id"),
             ("idx_documents_collection_id", "documents", "collection_id"),
             ("idx_documents_filename", "documents", "filename"),
             ("idx_documents_mimetype", "documents", "mimetype"),
@@ -188,19 +199,19 @@ async def ensure_vector_indexes():
 
 
 # Collection Operations - Using Proper PK/FK Relationships
-async def create_collection(name: str, description: str = None, idx: str = None):
-    """Create a new collection using UUID as primary key, idx as optional user metadata."""
+async def create_collection(name: str, description: str = None, idx: str = None, custom_id: str = None):
+    """Create a new collection using UUID as primary key, idx and custom_id as optional user metadata."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         # Generate UUID explicitly for primary key
         collection_uuid = str(uuid.uuid4())
         
-        # idx is now optional user-defined metadata, not a system identifier
+        # idx and custom_id are now optional user-defined metadata, not system identifiers
         result = await conn.fetchrow("""
-            INSERT INTO langchain_pg_collection (uuid, name, idx, description, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, NOW(), NOW())
-            RETURNING uuid, idx, name, description, created_at, updated_at
-        """, collection_uuid, name, idx, description)
+            INSERT INTO langchain_pg_collection (uuid, name, idx, custom_id, description, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+            RETURNING uuid, idx, custom_id, name, description, created_at, updated_at
+        """, collection_uuid, name, idx, custom_id, description)
         return dict(result)
 
 
@@ -209,7 +220,7 @@ async def get_collection_by_uuid(collection_uuid: str):
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.fetchrow("""
-            SELECT uuid, idx, name, description, created_at, updated_at
+            SELECT uuid, idx, custom_id, name, description, created_at, updated_at
             FROM langchain_pg_collection 
             WHERE uuid = $1
         """, collection_uuid)
@@ -221,10 +232,22 @@ async def get_collection_by_idx(idx: str):
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.fetchrow("""
-            SELECT uuid, idx, name, description, created_at, updated_at
+            SELECT uuid, idx, custom_id, name, description, created_at, updated_at
             FROM langchain_pg_collection 
             WHERE idx = $1
         """, idx)
+        return dict(result) if result else None
+
+
+async def get_collection_by_custom_id(custom_id: str):
+    """Get collection by its custom_id (user-defined identifier)."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow("""
+            SELECT uuid, idx, custom_id, name, description, created_at, updated_at
+            FROM langchain_pg_collection 
+            WHERE custom_id = $1
+        """, custom_id)
         return dict(result) if result else None
 
 
@@ -233,7 +256,7 @@ async def get_all_collections(limit: int = 10, offset: int = 0):
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         results = await conn.fetch("""
-            SELECT uuid, idx, name, description, created_at, updated_at
+            SELECT uuid, idx, custom_id, name, description, created_at, updated_at
             FROM langchain_pg_collection
             ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
@@ -244,7 +267,7 @@ async def get_all_collections(limit: int = 10, offset: int = 0):
         return [dict(row) for row in results], total
 
 
-async def update_collection(collection_uuid: str, name: str = None, description: str = None, idx: str = None):
+async def update_collection(collection_uuid: str, name: str = None, description: str = None, idx: str = None, custom_id: str = None):
     """Update collection by UUID primary key."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
@@ -267,6 +290,11 @@ async def update_collection(collection_uuid: str, name: str = None, description:
             updates.append(f"idx = ${param_count}")
             params.append(idx)
             
+        if custom_id is not None:
+            param_count += 1
+            updates.append(f"custom_id = ${param_count}")
+            params.append(custom_id)
+            
         if not updates:
             return None
             
@@ -278,7 +306,7 @@ async def update_collection(collection_uuid: str, name: str = None, description:
             UPDATE langchain_pg_collection 
             SET {', '.join(updates)}
             WHERE uuid = ${param_count}
-            RETURNING uuid, idx, name, description, created_at, updated_at
+            RETURNING uuid, idx, custom_id, name, description, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)
         return dict(result) if result else None
@@ -317,7 +345,7 @@ async def delete_collection_by_idx(idx: str):
 
 # Document Operations - Using Proper PK/FK Relationships
 async def create_document(
-    collection_uuid: str, filename: str = None, idx: str = None,
+    collection_uuid: str, filename: str = None, idx: str = None, custom_id: str = None,
     content: str = None, page_content: str = None, mimetype: str = None,
     description: str = None, save_pdf_path: bool = False, 
     auto_embed: bool = True, **kwargs
@@ -339,15 +367,15 @@ async def create_document(
         
         result = await conn.fetchrow("""
             INSERT INTO documents (
-                idx, collection_id, filename, content, page_content, mimetype, 
+                idx, custom_id, collection_id, filename, content, page_content, mimetype, 
                 binary_hash, description, page_number, pdf_path, keywords,
                 metadata, file_id, user_id, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
-            RETURNING serial_id, idx, collection_id, filename, content, page_content, 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+            RETURNING serial_id, idx, custom_id, collection_id, filename, content, page_content, 
                      mimetype, binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
-        """, idx, collection_uuid, filename, content, page_content, mimetype, 
+        """, idx, custom_id, collection_uuid, filename, content, page_content, mimetype, 
              binary_hash, description, page_number, pdf_path, keywords,
              metadata, file_id, user_id)
         return dict(result)
@@ -379,6 +407,19 @@ async def get_document_by_idx(idx: str):
         return dict(result) if result else None
 
 
+async def get_document_by_custom_id(custom_id: str):
+    """Get document by its custom_id (user-defined identifier)."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow("""
+            SELECT d.*, c.name as collection_name
+            FROM documents d
+            LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+            WHERE d.custom_id = $1
+        """, custom_id)
+        return dict(result) if result else None
+
+
 async def get_document_by_serial_id(serial_id: str):
     """Get document by its serial_id (UUID) - Alias for get_document_by_uuid."""
     return await get_document_by_uuid(serial_id)
@@ -396,7 +437,7 @@ async def update_document(document_uuid: str, **kwargs):
         if 'content' in kwargs and kwargs['content'] is not None:
             kwargs['binary_hash'] = hashlib.md5(kwargs['content'].encode()).hexdigest()
         
-        for field in ['idx', 'filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
+        for field in ['idx', 'custom_id', 'filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
                      'description', 'page_number', 'pdf_path', 'keywords', 'metadata']:
             if field in kwargs and kwargs[field] is not None:
                 param_count += 1
@@ -414,7 +455,7 @@ async def update_document(document_uuid: str, **kwargs):
             UPDATE documents 
             SET {', '.join(updates)}
             WHERE serial_id = ${param_count}
-            RETURNING serial_id, idx, collection_id, filename, content, page_content,
+            RETURNING serial_id, idx, custom_id, collection_id, filename, content, page_content,
                      mimetype, binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """
@@ -678,11 +719,13 @@ database = {
     'create_collection': create_collection,
     'get_collection': get_collection_by_uuid,
     'get_collection_by_uuid': get_collection_by_uuid,
+    'get_collection_by_custom_id': get_collection_by_custom_id,
     'update_collection': update_collection,
     'delete_collection': delete_collection,
     'create_document': create_document,
     'get_document': get_document_by_uuid,
     'get_document_by_uuid': get_document_by_uuid,
+    'get_document_by_custom_id': get_document_by_custom_id,
     'update_document': update_document,
     'delete_document': delete_document,
     'get_documents_by_collection': get_documents_by_collection,

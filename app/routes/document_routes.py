@@ -130,10 +130,13 @@ async def list_documents(
         offset = (page - 1) * page_size
         
         if collection_id:
-            # Try to get collection by UUID first, then by idx for backward compatibility
+            # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
             collection = await get_collection_by_uuid(collection_id)
             if not collection:
                 collection = await get_collection_by_idx(collection_id)
+            if not collection:
+                from app.services.database import get_collection_by_custom_id
+                collection = await get_collection_by_custom_id(collection_id)
                 
             if not collection:
                 raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
@@ -152,6 +155,7 @@ async def list_documents(
             response_items.append(DocumentResponse(
                 serial_id=str(doc['serial_id']),  # UUID as primary identifier
                 idx=doc.get('idx'),  # User-defined identifier
+                custom_id=doc.get('custom_id'),  # User-defined custom ID
                 filename=doc.get('filename', ''),
                 content=doc.get('content'),
                 page_content=doc.get('page_content'),
@@ -197,10 +201,13 @@ async def create_document_endpoint(
         # Validate collection if provided
         collection_uuid = None
         if document.collection_id:
-            # Try to get collection by UUID first, then by idx for backward compatibility
+            # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
             collection = await get_collection_by_uuid(document.collection_id)
             if not collection:
                 collection = await get_collection_by_idx(document.collection_id)
+            if not collection:
+                from app.services.database import get_collection_by_custom_id
+                collection = await get_collection_by_custom_id(document.collection_id)
                 
             if not collection:
                 raise HTTPException(status_code=404, detail=f"Collection {document.collection_id} not found")
@@ -209,6 +216,7 @@ async def create_document_endpoint(
         # Create document in database
         created_doc = await create_document(
             idx=document.idx,
+            custom_id=document.custom_id,
             collection_uuid=collection_uuid,
             filename=document.filename,
             content=document.content,
@@ -227,6 +235,7 @@ async def create_document_endpoint(
         return DocumentResponse(
             serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
             idx=created_doc.get('idx'),  # User-defined identifier
+            custom_id=created_doc.get('custom_id'),  # User-defined custom ID
             filename=created_doc.get('filename', ''),
             content=created_doc.get('content'),
             page_content=created_doc.get('page_content'),
@@ -256,6 +265,7 @@ async def create_document_with_upload(
     file: UploadFile = File(...),
     collection_id: Optional[str] = Form(None),
     idx: Optional[str] = Form(None),
+    custom_id: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     keywords: Optional[str] = Form(None),
     create_embeddings: bool = Form(True)
@@ -265,10 +275,13 @@ async def create_document_with_upload(
         # Validate collection if provided
         collection_uuid = None
         if collection_id:
-            # Try to get collection by UUID first, then by idx for backward compatibility
+            # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
             collection = await get_collection_by_uuid(collection_id)
             if not collection:
                 collection = await get_collection_by_idx(collection_id)
+            if not collection:
+                from app.services.database import get_collection_by_custom_id
+                collection = await get_collection_by_custom_id(collection_id)
                 
             if not collection:
                 raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
@@ -310,6 +323,7 @@ async def create_document_with_upload(
             # Create document in database
             created_doc = await create_document(
                 idx=idx or document_id,
+                custom_id=custom_id,
                 collection_uuid=collection_uuid,
                 filename=file.filename,
                 content=full_content,
@@ -337,6 +351,7 @@ async def create_document_with_upload(
             return DocumentResponse(
                 serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
                 idx=created_doc.get('idx'),  # User-defined identifier
+                custom_id=created_doc.get('custom_id'),  # User-defined custom ID
                 filename=created_doc.get('filename', ''),
                 content=created_doc.get('content'),
                 page_content=created_doc.get('page_content'),
@@ -370,12 +385,15 @@ async def create_document_with_upload(
 
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document_endpoint(document_id: str, request: Request):
-    """Get a specific document by ID (accepts both UUID and idx)."""
+    """Get a specific document by ID (accepts UUID, idx, or custom_id)."""
     try:
-        # Try to get by UUID first, then fall back to idx for backward compatibility
+        # Try to get by UUID first, then fall back to idx and custom_id for backward compatibility
         doc = await get_document_by_uuid(document_id)
         if not doc:
             doc = await get_document_by_idx(document_id)
+        if not doc:
+            from app.services.database import get_document_by_custom_id
+            doc = await get_document_by_custom_id(document_id)
         
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -383,6 +401,7 @@ async def get_document_endpoint(document_id: str, request: Request):
         return DocumentResponse(
             serial_id=str(doc['serial_id']),  # UUID as primary identifier
             idx=doc.get('idx'),  # User-defined identifier
+            custom_id=doc.get('custom_id'),  # User-defined custom ID
             filename=doc.get('filename', ''),
             content=doc.get('content'),
             page_content=doc.get('page_content'),
@@ -425,10 +444,13 @@ async def update_document_endpoint(
         if 'metadata' in update_data and update_data['metadata'] is not None:
             update_data['metadata'] = json.dumps(update_data['metadata'])
         
-        # Try to get document by UUID first, then by idx for backward compatibility
+        # Try to get document by UUID first, then by idx and custom_id for backward compatibility
         doc = await get_document_by_uuid(document_id)
         if not doc:
             doc = await get_document_by_idx(document_id)
+        if not doc:
+            from app.services.database import get_document_by_custom_id
+            doc = await get_document_by_custom_id(document_id)
             
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -439,6 +461,7 @@ async def update_document_endpoint(
         return DocumentResponse(
             serial_id=str(updated_doc['serial_id']),  # UUID as primary identifier
             idx=updated_doc.get('idx'),  # User-defined identifier
+            custom_id=updated_doc.get('custom_id'),  # User-defined custom ID
             filename=updated_doc.get('filename', ''),
             content=updated_doc.get('content'),
             page_content=updated_doc.get('page_content'),
@@ -466,10 +489,13 @@ async def update_document_endpoint(
 async def delete_document_endpoint(document_id: str, request: Request):
     """Delete a specific document."""
     try:
-        # Try to get document by UUID first, then by idx for backward compatibility
+        # Try to get document by UUID first, then by idx and custom_id for backward compatibility
         doc = await get_document_by_uuid(document_id)
         if not doc:
             doc = await get_document_by_idx(document_id)
+        if not doc:
+            from app.services.database import get_document_by_custom_id
+            doc = await get_document_by_custom_id(document_id)
             
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -498,10 +524,13 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
         
         for doc_id in document_ids:
             try:
-                # Try to get document by UUID first, then by idx for backward compatibility
+                # Try to get document by UUID first, then by idx and custom_id for backward compatibility
                 doc = await get_document_by_uuid(doc_id)
                 if not doc:
                     doc = await get_document_by_idx(doc_id)
+                if not doc:
+                    from app.services.database import get_document_by_custom_id
+                    doc = await get_document_by_custom_id(doc_id)
                     
                 if not doc:
                     failed_ids.append(doc_id)

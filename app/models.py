@@ -9,6 +9,7 @@ from datetime import datetime
 class DocumentResponse(BaseModel):
     serial_id: str  # UUID primary key (system identifier)
     idx: Optional[str] = None  # User-defined identifier (optional)
+    custom_id: Optional[str] = None  # User-defined custom ID (optional)
     filename: str
     content: Optional[str] = None
     page_content: Optional[str] = None  # For vector chunks
@@ -39,6 +40,7 @@ class DocumentCreate(BaseModel):
     file_id: Optional[str] = Field(None, description="Legacy file ID for compatibility")
     user_id: Optional[str] = Field(None, description="User ID")
     idx: Optional[str] = Field(None, description="User-defined document identifier (optional)")
+    custom_id: Optional[str] = Field(None, description="User-defined custom ID (optional)")
 
 
 
@@ -49,6 +51,7 @@ class DocumentUpdate(BaseModel):
     page_content: Optional[str] = Field(None, description="Chunk content for vector search")
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
+    custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     metadata: Optional[dict] = Field(None, description="Document metadata")
 
     class Config:
@@ -78,6 +81,7 @@ class CollectionCreate(BaseModel):
     name: str = Field(..., description="Collection name")
     description: Optional[str] = Field(None, description="Collection description")
     idx: Optional[str] = Field(None, description="User-defined collection identifier (optional)")
+    custom_id: Optional[str] = Field(None, description="User-defined custom ID (optional)")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
@@ -86,6 +90,7 @@ class CollectionUpdate(BaseModel):
     name: Optional[str] = Field(None, description="Collection name")
     description: Optional[str] = Field(None, description="Collection description")
     idx: Optional[str] = Field(None, description="User-defined collection identifier")
+    custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Collection metadata")
 
     class Config:
@@ -96,6 +101,7 @@ class CollectionUpdate(BaseModel):
 class CollectionResponse(BaseModel):
     id: str = Field(..., description="Collection UUID (primary key)")
     idx: Optional[str] = Field(None, description="User-defined collection identifier")
+    custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     name: str
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None

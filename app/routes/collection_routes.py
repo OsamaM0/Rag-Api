@@ -43,12 +43,14 @@ async def create_collection(
         result = await database.create_collection(
             name=collection.name,
             description=collection.description,
-            idx=collection.idx  # User-defined identifier (optional)
+            idx=collection.idx,  # User-defined identifier (optional)
+            custom_id=collection.custom_id  # User-defined custom ID (optional)
         )
         
         response = CollectionResponse(
             id=result['uuid'],  # UUID as primary identifier
             idx=result.get('idx'),  # User-defined identifier
+            custom_id=result.get('custom_id'),  # User-defined custom ID
             name=result['name'],
             description=result['description'],
             metadata=collection.metadata or {},
@@ -87,6 +89,7 @@ async def list_collections(
             collection_responses.append(CollectionResponse(
                 id=collection['uuid'],  # UUID as primary identifier
                 idx=collection.get('idx'),  # User-defined identifier
+                custom_id=collection.get('custom_id'),  # User-defined custom ID
                 name=collection['name'],
                 description=collection['description'],
                 metadata={},  # Collections don't store complex metadata in this schema
@@ -113,12 +116,14 @@ async def list_collections(
 
 @router.get("/{collection_id}", response_model=CollectionResponse)
 async def get_collection(collection_id: str, request: Request):
-    """Get a specific collection by ID (accepts both UUID and idx)."""
+    """Get a specific collection by ID (accepts UUID, idx, or custom_id)."""
     try:
-        # Try to get by UUID first, then fall back to idx for backward compatibility
+        # Try to get by UUID first, then fall back to idx and custom_id for backward compatibility
         collection = await database.get_collection_by_uuid(collection_id)
         if not collection:
             collection = await database.get_collection_by_idx(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_custom_id(collection_id)
             
         if not collection:
             raise HTTPException(status_code=404, detail="Collection not found")
@@ -126,6 +131,7 @@ async def get_collection(collection_id: str, request: Request):
         return CollectionResponse(
             id=collection['uuid'],  # UUID as primary identifier
             idx=collection.get('idx'),  # User-defined identifier
+            custom_id=collection.get('custom_id'),  # User-defined custom ID
             name=collection['name'],
             description=collection['description'],
             metadata={},
@@ -159,6 +165,8 @@ async def update_collection(
         collection = await database.get_collection_by_uuid(collection_id)
         if not collection:
             collection = await database.get_collection_by_idx(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_custom_id(collection_id)
             
         if not collection:
             raise HTTPException(status_code=404, detail="Collection not found")
@@ -172,6 +180,7 @@ async def update_collection(
         return CollectionResponse(
             id=result['uuid'],  # UUID as primary identifier
             idx=result.get('idx'),  # User-defined identifier
+            custom_id=result.get('custom_id'),  # User-defined custom ID
             name=result['name'],
             description=result['description'],
             metadata=collection_update.metadata or {},
@@ -190,10 +199,12 @@ async def update_collection(
 async def delete_collection(collection_id: str, request: Request):
     """Delete a collection and all its documents and embeddings."""
     try:
-        # Try to get collection by UUID first, then by idx for backward compatibility
+        # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
         collection = await database.get_collection_by_uuid(collection_id)
         if not collection:
             collection = await database.get_collection_by_idx(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_custom_id(collection_id)
             
         if not collection:
             raise HTTPException(status_code=404, detail="Collection not found")
@@ -224,10 +235,12 @@ async def bulk_delete_collections(
         
         for collection_id in collection_ids:
             try:
-                # Try to get collection by UUID first, then by idx for backward compatibility
+                # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
                 collection = await database.get_collection_by_uuid(collection_id)
                 if not collection:
                     collection = await database.get_collection_by_idx(collection_id)
+                if not collection:
+                    collection = await database.get_collection_by_custom_id(collection_id)
                     
                 if not collection:
                     failed_count += 1
@@ -267,10 +280,12 @@ async def get_collection_documents(
 ):
     """Get all documents in a collection."""
     try:
-        # Try to get collection by UUID first, then by idx for backward compatibility
+        # Try to get collection by UUID first, then by idx and custom_id for backward compatibility
         collection = await database.get_collection_by_uuid(collection_id)
         if not collection:
             collection = await database.get_collection_by_idx(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_custom_id(collection_id)
             
         if not collection:
             raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
