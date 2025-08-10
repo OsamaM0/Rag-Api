@@ -4,32 +4,39 @@ import uuid
 import os
 import hashlib
 import json
-from shutil import copyfileobj
 from typing import List, Optional
 
 import aiofiles
 import aiofiles.os
-from fastapi import APIRouter, HTTPException, Query, Request, Body, File, UploadFile, Form, status
+from fastapi import APIRouter, HTTPException, Query, Request, Body, File, UploadFile, Form
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import RAG_UPLOAD_DIR, logger, VECTOR_DB_TYPE, VectorDBType, vector_store
 from app.models import (
-    DocumentResponse, DocumentCreate, DocumentUpdate, DocumentUploadRequest,
-    PaginatedResponse, SuccessResponse
+    DocumentResponse, DocumentCreate, DocumentUpdate, PaginatedResponse, SuccessResponse
 )
 from app.services.database import (
     get_all_documents,
     get_documents_by_collection,
     get_document_by_idx,
-    get_document_by_serial_id,
+    get_document_by_uuid,
     create_document,
+    update_document_by_idx,
     update_document,
+    delete_document_by_idx,
     delete_document,
-    create_embedding
+    create_embedding,
+    get_collection_by_uuid,
+    get_collection_by_idx
 )
 from app.utils.document_loader import get_loader, cleanup_temp_encoding_file
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
+
+
+def filter_none_values(data: dict) -> dict:
+    """Remove None values from dictionary to support partial updates."""
+    return {k: v for k, v in data.items() if v is not None}
 
 
 def parse_metadata(metadata_value):
@@ -123,11 +130,17 @@ async def list_documents(
         offset = (page - 1) * page_size
         
         if collection_id:
-            documents, total = await get_documents_by_collection(
-                collection_id, limit=page_size, offset=offset
-            )
-            if documents is None:
+            # Try to get collection by UUID first, then by idx for backward compatibility
+            collection = await get_collection_by_uuid(collection_id)
+            if not collection:
+                collection = await get_collection_by_idx(collection_id)
+                
+            if not collection:
                 raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
+                
+            documents, total = await get_documents_by_collection(
+                collection['uuid'], limit=page_size, offset=offset
+            )
         else:
             documents, total = await get_all_documents(
                 limit=page_size, offset=offset, user_id=user_id, file_id=file_id
@@ -137,8 +150,8 @@ async def list_documents(
         response_items = []
         for doc in documents:
             response_items.append(DocumentResponse(
-                serial_id=str(doc['serial_id']),
-                idx=doc.get('idx'),
+                serial_id=str(doc['serial_id']),  # UUID as primary identifier
+                idx=doc.get('idx'),  # User-defined identifier
                 filename=doc.get('filename', ''),
                 content=doc.get('content'),
                 page_content=doc.get('page_content'),
@@ -181,13 +194,22 @@ async def create_document_endpoint(
 ):
     """Create a new document."""
     try:
-        # Generate a unique ID for the document
-        document_id = str(uuid.uuid4())
+        # Validate collection if provided
+        collection_uuid = None
+        if document.collection_id:
+            # Try to get collection by UUID first, then by idx for backward compatibility
+            collection = await get_collection_by_uuid(document.collection_id)
+            if not collection:
+                collection = await get_collection_by_idx(document.collection_id)
+                
+            if not collection:
+                raise HTTPException(status_code=404, detail=f"Collection {document.collection_id} not found")
+            collection_uuid = collection['uuid']
         
         # Create document in database
         created_doc = await create_document(
             idx=document.idx,
-            collection_id=document.collection_id,
+            collection_uuid=collection_uuid,
             filename=document.filename,
             content=document.content,
             page_content=document.page_content,
@@ -203,8 +225,8 @@ async def create_document_endpoint(
             raise HTTPException(status_code=500, detail="Failed to create document in database")
         
         return DocumentResponse(
-            serial_id=str(created_doc['serial_id']),
-            idx=created_doc.get('idx'),
+            serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
+            idx=created_doc.get('idx'),  # User-defined identifier
             filename=created_doc.get('filename', ''),
             content=created_doc.get('content'),
             page_content=created_doc.get('page_content'),
@@ -240,6 +262,18 @@ async def create_document_with_upload(
 ):
     """Create a new document by uploading a file with optional embedding generation."""
     try:
+        # Validate collection if provided
+        collection_uuid = None
+        if collection_id:
+            # Try to get collection by UUID first, then by idx for backward compatibility
+            collection = await get_collection_by_uuid(collection_id)
+            if not collection:
+                collection = await get_collection_by_idx(collection_id)
+                
+            if not collection:
+                raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
+            collection_uuid = collection['uuid']
+        
         # Generate unique ID for the document
         document_id = str(uuid.uuid4())
         
@@ -276,7 +310,7 @@ async def create_document_with_upload(
             # Create document in database
             created_doc = await create_document(
                 idx=idx or document_id,
-                collection_id=collection_id,
+                collection_uuid=collection_uuid,
                 filename=file.filename,
                 content=full_content,
                 page_content=page_content,
@@ -301,8 +335,8 @@ async def create_document_with_upload(
                     # Don't fail the whole operation if embedding creation fails
             
             return DocumentResponse(
-                serial_id=str(created_doc['serial_id']),
-                idx=created_doc.get('idx'),
+                serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
+                idx=created_doc.get('idx'),  # User-defined identifier
                 filename=created_doc.get('filename', ''),
                 content=created_doc.get('content'),
                 page_content=created_doc.get('page_content'),
@@ -336,23 +370,19 @@ async def create_document_with_upload(
 
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document_endpoint(document_id: str, request: Request):
-    """Get a specific document by ID."""
+    """Get a specific document by ID (accepts both UUID and idx)."""
     try:
-        # Try to parse as UUID first (serial_id), if it fails, treat as idx
-        try:
-            uuid.UUID(document_id)
-            # It's a valid UUID, so it's a serial_id
-            doc = await get_document_by_serial_id(document_id)
-        except ValueError:
-            # It's not a UUID, so it's an idx
+        # Try to get by UUID first, then fall back to idx for backward compatibility
+        doc = await get_document_by_uuid(document_id)
+        if not doc:
             doc = await get_document_by_idx(document_id)
         
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
         return DocumentResponse(
-            serial_id=str(doc['serial_id']),
-            idx=doc.get('idx'),
+            serial_id=str(doc['serial_id']),  # UUID as primary identifier
+            idx=doc.get('idx'),  # User-defined identifier
             filename=doc.get('filename', ''),
             content=doc.get('content'),
             page_content=doc.get('page_content'),
@@ -377,51 +407,38 @@ async def get_document_endpoint(document_id: str, request: Request):
 
 
 @router.put("/{document_id}", response_model=DocumentResponse)
+@router.patch("/{document_id}", response_model=DocumentResponse)
 async def update_document_endpoint(
     document_id: str,
     document_update: DocumentUpdate,
     request: Request
 ):
-    """Update a document."""
+    """Update a document (supports both PUT and PATCH for partial updates)."""
     try:
-        # Build update parameters from the DocumentUpdate model
-        update_params = {}
+        # Use Pydantic's model_dump to get only set fields, excluding None values
+        update_data = document_update.model_dump(exclude_unset=True, exclude_none=True)
         
-        if document_update.filename is not None:
-            update_params['filename'] = document_update.filename
-        if document_update.content is not None:
-            update_params['content'] = document_update.content
-        if document_update.page_content is not None:
-            update_params['page_content'] = document_update.page_content
-        if document_update.description is not None:
-            update_params['description'] = document_update.description
-        if document_update.keywords is not None:
-            update_params['keywords'] = document_update.keywords
-        if document_update.metadata is not None:
-            # Convert metadata to JSON string for database storage
-            update_params['metadata'] = json.dumps(document_update.metadata)
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No valid fields provided for update")
         
-        # Try to parse as UUID first (serial_id), if it fails, treat as idx
-        try:
-            uuid.UUID(document_id)
-            # For serial_id, we need to get the idx first, then update by idx
-            doc = await get_document_by_serial_id(document_id)
-            if not doc:
-                raise HTTPException(status_code=404, detail="Document not found")
-            document_idx = doc['idx']
-        except ValueError:
-            # It's an idx
-            document_idx = document_id
+        # Convert metadata to JSON string if it exists
+        if 'metadata' in update_data and update_data['metadata'] is not None:
+            update_data['metadata'] = json.dumps(update_data['metadata'])
         
-        # Update document in database
-        updated_doc = await update_document(document_idx, **update_params)
-        
-        if not updated_doc:
+        # Try to get document by UUID first, then by idx for backward compatibility
+        doc = await get_document_by_uuid(document_id)
+        if not doc:
+            doc = await get_document_by_idx(document_id)
+            
+        if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-
+        
+        # Update document using UUID (serial_id)
+        updated_doc = await update_document(doc['serial_id'], **update_data)
+        
         return DocumentResponse(
-            serial_id=str(updated_doc['serial_id']),
-            idx=updated_doc.get('idx'),
+            serial_id=str(updated_doc['serial_id']),  # UUID as primary identifier
+            idx=updated_doc.get('idx'),  # User-defined identifier
             filename=updated_doc.get('filename', ''),
             content=updated_doc.get('content'),
             page_content=updated_doc.get('page_content'),
@@ -449,13 +466,21 @@ async def update_document_endpoint(
 async def delete_document_endpoint(document_id: str, request: Request):
     """Delete a specific document."""
     try:
-        # Delete document and associated embeddings from database
-        success = await delete_document(document_id)
+        # Try to get document by UUID first, then by idx for backward compatibility
+        doc = await get_document_by_uuid(document_id)
+        if not doc:
+            doc = await get_document_by_idx(document_id)
+            
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Delete document using UUID (serial_id)
+        success = await delete_document(doc['serial_id'])
         
         if not success:
-            raise HTTPException(status_code=404, detail="Document not found")
+            raise HTTPException(status_code=500, detail="Failed to delete document")
 
-        return SuccessResponse(message=f"Document {document_id} deleted successfully")
+        return SuccessResponse(message=f"Document {doc.get('filename', document_id)} deleted successfully")
         
     except HTTPException:
         raise
@@ -472,11 +497,25 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
         failed_ids = []
         
         for doc_id in document_ids:
-            success = await delete_document(doc_id)
-            if success:
-                deleted_count += 1
-            else:
+            try:
+                # Try to get document by UUID first, then by idx for backward compatibility
+                doc = await get_document_by_uuid(doc_id)
+                if not doc:
+                    doc = await get_document_by_idx(doc_id)
+                    
+                if not doc:
+                    failed_ids.append(doc_id)
+                    continue
+                
+                # Delete using UUID (serial_id)
+                success = await delete_document(doc['serial_id'])
+                if success:
+                    deleted_count += 1
+                else:
+                    failed_ids.append(doc_id)
+            except Exception as e:
                 failed_ids.append(doc_id)
+                logger.error(f"Failed to delete document {doc_id}: {str(e)}")
         
         if failed_ids:
             logger.warning(f"Failed to delete documents: {failed_ids}")

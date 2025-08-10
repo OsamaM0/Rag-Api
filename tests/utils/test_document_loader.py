@@ -1,4 +1,3 @@
-import os
 from app.utils.document_loader import get_loader, clean_text, process_documents
 from langchain_core.documents import Document
 
@@ -25,6 +24,7 @@ def test_process_documents():
         Document(page_content="Page 2 content", metadata={"source": "dummy.txt", "page": 2}),
     ]
     processed = process_documents(docs)
-    assert "dummy.txt" in processed
     assert "# PAGE 1" in processed
     assert "# PAGE 2" in processed
+    assert "Page 1 content" in processed
+    assert "Page 2 content" in processed

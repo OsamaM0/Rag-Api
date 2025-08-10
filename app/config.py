@@ -302,10 +302,11 @@ if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
         mode="async",
     )
 elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
-    # Backward compatability check
+    # Backward compatibility check
     if MONGO_VECTOR_COLLECTION:
-        logger.info(
-            f"DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. You can set both as same, but not neccessary. See README for more information."
+        logger.warning(
+            "DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. "
+            "You can set both to the same value if needed. See README for more information."
         )
         ATLAS_SEARCH_INDEX = MONGO_VECTOR_COLLECTION
         COLLECTION_NAME = MONGO_VECTOR_COLLECTION

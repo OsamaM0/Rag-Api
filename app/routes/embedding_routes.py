@@ -2,7 +2,7 @@
 import traceback
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Request, Query, status
+from fastapi import APIRouter, HTTPException, Request, Query
 from app.config import logger, vector_store, VECTOR_DB_TYPE, VectorDBType
 from app.models import (
     EmbeddingResponse,
@@ -12,13 +12,15 @@ from app.models import (
 )
 from app.services.database import (
     get_document_by_idx,
-    get_document_by_serial_id,
+    get_document_by_uuid,
     create_embedding,
     get_embedding_by_id,
     delete_embedding,
     similarity_search_embeddings,
     get_embeddings_by_document,
-    get_all_embeddings
+    get_all_embeddings,
+    get_collection_by_uuid,
+    get_collection_by_idx
 )
 from app.services.vector_store.async_pg_vector import AsyncPgVector
 
@@ -26,14 +28,12 @@ router = APIRouter(prefix="/embeddings", tags=["Embeddings"])
 
 
 async def get_document_by_id(document_id: str):
-    """Get document by either serial_id (UUID) or idx (string)."""
-    try:
-        uuid.UUID(document_id)
-        # It's a valid UUID, so it's a serial_id
-        return await get_document_by_serial_id(document_id)
-    except ValueError:
-        # It's not a UUID, so it's an idx
-        return await get_document_by_idx(document_id)
+    """Get document by either UUID or idx (string)."""
+    # Try to get by UUID first, then fall back to idx for backward compatibility
+    doc = await get_document_by_uuid(document_id)
+    if not doc:
+        doc = await get_document_by_idx(document_id)
+    return doc
 
 
 def parse_metadata(metadata):
@@ -68,12 +68,12 @@ def parse_embedding(embedding):
         return []
 
 
-async def create_vector_embedding(content: str, document_id: str, collection_id: str = None, metadata: dict = None, request: Request = None):
+async def create_vector_embedding(content: str, document_uuid: str, collection_uuid: str = None, metadata: dict = None, request: Request = None):
     """Create embedding using the configured vector store (PG Vector or Atlas Mongo)."""
     try:
         if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
             # Use database-only approach for PG Vector
-            custom_id = f"{document_id}_embedding_{hash(content) % 1000000}"
+            custom_id = f"{document_uuid}_embedding_{hash(content) % 1000000}"
             
             # Get embedding vector using the configured embeddings
             from app.config import embeddings
@@ -83,14 +83,14 @@ async def create_vector_embedding(content: str, document_id: str, collection_id:
                 custom_id=custom_id,
                 embedding=embedding_vector,
                 document_text=content,
-                document_id=document_id,
-                collection_id=collection_id,
+                document_uuid=document_uuid,
+                collection_uuid=collection_uuid,
                 metadata=metadata or {}
             )
         elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
             # Use vector store approach for Atlas Mongo
             from langchain_core.documents import Document
-            doc = Document(page_content=content, metadata={**metadata, "document_id": document_id})
+            doc = Document(page_content=content, metadata={**metadata, "document_uuid": document_uuid})
             
             if isinstance(vector_store, AsyncPgVector):
                 ids = await vector_store.aadd_documents([doc], executor=request.app.state.thread_pool if request else None)
@@ -99,7 +99,7 @@ async def create_vector_embedding(content: str, document_id: str, collection_id:
             
             return {
                 "embedding_id": ids[0] if ids else None,
-                "document_id": document_id,
+                "document_uuid": document_uuid,
                 "content": content,
                 "metadata": metadata,
                 "embedding": [],  # Vector store handles this internally
@@ -200,11 +200,11 @@ async def create_embeddings_for_document(
             }
             
             # Create embedding using the appropriate vector store
-            # Use the document's serial_id as the document_id for proper foreign key relationship
+            # Use the document's UUID (serial_id) as the document_uuid for proper foreign key relationship
             embedding_record = await create_vector_embedding(
                 content=chunk_text,
-                document_id=str(document['serial_id']),  # Use serial_id from documents table
-                collection_id=str(document['collection_id']) if document.get('collection_id') else None,
+                document_uuid=str(document['serial_id']),  # Use serial_id from documents table
+                collection_uuid=str(document['collection_id']) if document.get('collection_id') else None,
                 metadata=chunk_metadata,
                 request=request
             )
@@ -243,8 +243,8 @@ async def create_single_embedding(
         # Create embedding using the appropriate vector store
         embedding_record = await create_vector_embedding(
             content=embedding_request.text,
-            document_id=str(document['serial_id']),  # Use serial_id from documents table
-            collection_id=str(document['collection_id']) if document.get('collection_id') else None,
+            document_uuid=str(document['serial_id']),  # Use serial_id from documents table
+            collection_uuid=str(document['collection_id']) if document.get('collection_id') else None,
             metadata=embedding_request.metadata or {},
             request=request
         )
@@ -279,12 +279,12 @@ async def list_embeddings(
         offset = (page - 1) * page_size
         
         if document_id:
-            # Get document to verify it exists and get its serial_id
+            # Get document to verify it exists and get its UUID
             document = await get_document_by_id(document_id)
             if not document:
                 raise HTTPException(status_code=404, detail="Document not found")
             
-            # Get embeddings for specific document using its serial_id
+            # Get embeddings for specific document using its UUID (serial_id)
             embeddings = await get_embeddings_by_document(str(document['serial_id']))
             total = len(embeddings)
             # Apply pagination manually since database function doesn't support it
@@ -374,7 +374,7 @@ async def find_similar_embeddings_in_document(
 ):
     """Find similar embeddings to the given text within a specific document."""
     try:
-        # Get document to verify it exists and get its serial_id
+        # Get document to verify it exists and get its UUID
         document = await get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -383,11 +383,11 @@ async def find_similar_embeddings_in_document(
         from app.config import embeddings
         query_embedding = embeddings.embed_query(text)
         
-        # Search only within this document using its serial_id
+        # Search only within this document using its UUID (serial_id)
         raw_results = await similarity_search_embeddings(
             query_embedding=query_embedding, 
             k=k, 
-            document_id=str(document['serial_id'])
+            document_uuid=str(document['serial_id'])
         )
         
         # Convert to expected format
@@ -406,7 +406,7 @@ async def find_similar_embeddings_in_document(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to find similar embeddings in document | Document ID: {document_id} | Text: {embedding_request.text[:50]}... | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        logger.error(f"Failed to find similar embeddings in document | Document ID: {document_id} | Text: {text[:50]}... | Error: {str(e)} | Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to find similar embeddings in document: {str(e)}")
 
 
@@ -418,15 +418,23 @@ async def find_similar_embeddings_in_collection(
 ):
     """Find similar embeddings to the given text within a specific collection."""
     try:
+        # Try to get collection by UUID first, then by idx for backward compatibility
+        collection = await get_collection_by_uuid(collection_id)
+        if not collection:
+            collection = await get_collection_by_idx(collection_id)
+            
+        if not collection:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        
         # Convert query text to embedding vector
         from app.config import embeddings
         query_embedding = embeddings.embed_query(text)
         
-        # Search only within this collection
+        # Search only within this collection using its UUID
         raw_results = await similarity_search_embeddings(
             query_embedding=query_embedding, 
             k=k, 
-            collection_id=collection_id
+            collection_uuid=collection['uuid']
         )
         
         # Convert to expected format
@@ -445,7 +453,7 @@ async def find_similar_embeddings_in_collection(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to find similar embeddings in collection | Collection ID: {collection_id} | Text: {embedding_request.text[:50]}... | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        logger.error(f"Failed to find similar embeddings in collection | Collection ID: {collection_id} | Text: {text[:50]}... | Error: {str(e)} | Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to find similar embeddings in collection: {str(e)}")
 
 
@@ -460,7 +468,7 @@ async def get_document_embeddings(
     try:
         offset = (page - 1) * page_size
         
-        # Get document to verify it exists and get its serial_id
+        # Get document to verify it exists and get its UUID
         document = await get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -504,13 +512,13 @@ async def get_document_embeddings(
 async def delete_document_embeddings(document_id: str, request: Request):
     """Delete all embeddings for a specific document."""
     try:
-        # Get document to verify it exists and get its serial_id
+        # Get document to verify it exists and get its UUID
         document = await get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Get all embeddings for the document using its serial_id
-        embeddings = await get_embeddings_by_document(str(document['serial_id']))
+        # Get all embeddings for the document using its UUID
+        embeddings = await get_embeddings_by_document(str(document['uuid']))
         
         if not embeddings:
             return SuccessResponse(message=f"No embeddings found for document {document_id}")
@@ -538,12 +546,15 @@ async def get_embedding_stats(request: Request):
     """Get embedding statistics."""
     try:
         # Get total embeddings count by counting all documents' embeddings
-        # TODO: Implement more efficient counting in database service
+        # Get embedding statistics
         total_embeddings = 0
         try:
-            # This is a temporary workaround - should be optimized
-            total_embeddings = 0  # Placeholder until proper implementation
-        except Exception:
+            # Get actual count from database
+            embeddings_result = await get_all_embeddings(limit=1, offset=0)
+            if embeddings_result and "total" in embeddings_result:
+                total_embeddings = embeddings_result["total"]
+        except Exception as e:
+            logger.warning(f"Could not retrieve embedding count: {e}")
             total_embeddings = 0
         
         # Calculate approximate storage size (assuming 1536-dimensional embeddings)
@@ -562,8 +573,6 @@ async def get_embedding_stats(request: Request):
     except Exception as e:
         logger.error(f"Failed to get embedding stats | Error: {str(e)} | Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to get embedding stats: {str(e)}")
-        logger.error(f"Failed to get embedding stats | Error: {str(e)} | Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to get embedding stats: {str(e)}")
 
 
 @router.post("/recompute/{embedding_id}")
@@ -577,7 +586,7 @@ async def recompute_embedding(embedding_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Embedding not found")
 
         # For now, return success without actual recomputation
-        # TODO: Implement actual embedding recomputation using database-only approach
+        # Implementation would include re-embedding the document content
         logger.info(f"Embedding recompute requested for: {embedding_id}")
         
         return {

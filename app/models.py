@@ -1,15 +1,14 @@
 # app/models.py
-import hashlib
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
-# Document Models - Consolidated for single Document table
+# Document Models - Using Proper PK/FK Relationships
 class DocumentResponse(BaseModel):
-    serial_id: str  # UUID as string  
-    idx: Optional[str] = None
+    serial_id: str  # UUID primary key (system identifier)
+    idx: Optional[str] = None  # User-defined identifier (optional)
     filename: str
     content: Optional[str] = None
     page_content: Optional[str] = None  # For vector chunks
@@ -19,7 +18,7 @@ class DocumentResponse(BaseModel):
     keywords: Optional[str] = None
     page_number: Optional[int] = None
     pdf_path: Optional[str] = None
-    collection_id: Optional[str] = None
+    collection_id: Optional[str] = None  # UUID foreign key to collection
     collection_name: Optional[str] = None
     metadata: Optional[dict] = None
     created_at: Optional[datetime] = None
@@ -35,28 +34,34 @@ class DocumentCreate(BaseModel):
     keywords: Optional[str] = Field(None, description="Document keywords")
     page_number: Optional[int] = Field(None, description="Page number if applicable")
     save_pdf_path: bool = Field(False, description="Whether to save PDF file to disk")
-    collection_id: str = Field(..., description="Collection ID this document belongs to")
+    collection_id: str = Field(..., description="Collection UUID this document belongs to")
     metadata: Optional[dict] = Field(default_factory=dict)
     file_id: Optional[str] = Field(None, description="Legacy file ID for compatibility")
     user_id: Optional[str] = Field(None, description="User ID")
-    idx: Optional[str] = Field(None, description="Document index")
+    idx: Optional[str] = Field(None, description="User-defined document identifier (optional)")
 
 
 
 class DocumentUpdate(BaseModel):
-    filename: Optional[str] = None
-    content: Optional[str] = None
-    page_content: Optional[str] = None
-    description: Optional[str] = None
-    keywords: Optional[str] = None
-    metadata: Optional[dict] = None
+    """Model for partial document updates. All fields are optional to support PATCH operations."""
+    filename: Optional[str] = Field(None, description="Original filename")
+    content: Optional[str] = Field(None, description="Full text content of the document")
+    page_content: Optional[str] = Field(None, description="Chunk content for vector search")
+    description: Optional[str] = Field(None, description="Document description")
+    keywords: Optional[str] = Field(None, description="Document keywords")
+    metadata: Optional[dict] = Field(None, description="Document metadata")
+
+    class Config:
+        # Allow partial updates by including None values in serialization
+        # but exclude unset fields to support true partial updates
+        extra = "forbid"
 
 
 class DocumentUploadRequest(BaseModel):
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
     save_pdf_path: bool = Field(False, description="Whether to save PDF file to disk")
-    collection_id: str = Field(..., description="Collection ID this document belongs to")
+    collection_id: str = Field(..., description="Collection UUID this document belongs to")
     auto_embed: bool = Field(True, description="Automatically create embeddings for document")
 
 
@@ -68,21 +73,29 @@ class StoreDocument(BaseModel):
     file_id: str
 
 
-# Collection Models
+# Collection Models - Using Proper PK/FK Relationships  
 class CollectionCreate(BaseModel):
     name: str = Field(..., description="Collection name")
     description: Optional[str] = Field(None, description="Collection description")
+    idx: Optional[str] = Field(None, description="User-defined collection identifier (optional)")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
 class CollectionUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    """Model for partial collection updates. All fields are optional to support PATCH operations."""
+    name: Optional[str] = Field(None, description="Collection name")
+    description: Optional[str] = Field(None, description="Collection description")
+    idx: Optional[str] = Field(None, description="User-defined collection identifier")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Collection metadata")
+
+    class Config:
+        # Allow partial updates by excluding unset fields
+        extra = "forbid"
 
 
 class CollectionResponse(BaseModel):
-    id: str
+    id: str = Field(..., description="Collection UUID (primary key)")
+    idx: Optional[str] = Field(None, description="User-defined collection identifier")
     name: str
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None

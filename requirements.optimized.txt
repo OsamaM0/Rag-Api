@@ -1,0 +1,61 @@
+# Core LangChain dependencies
+langchain==0.3.12
+langchain-community==0.3.12
+langchain-core==0.3.27
+langchain_text_splitters==0.3.3
+
+# Provider-specific LangChain integrations
+langchain-openai==0.2.11
+langchain-aws==0.2.1
+langchain-google-vertexai==2.0.0
+langchain-mongodb==0.2.0
+langchain-ollama==0.2.0
+langchain-huggingface==0.1.0
+
+# FastAPI and web server
+fastapi==0.115.12
+uvicorn==0.28.0
+python-multipart==0.0.19
+
+# Database connections
+psycopg2-binary==2.9.9
+asyncpg==0.29.0
+pymongo==4.6.3
+sqlalchemy==2.0.28
+pgvector==0.2.5
+
+# AWS and cloud services
+boto3==1.34.144
+
+# Document processing
+pypdf==4.1.0
+unstructured==0.16.11
+docx2txt==0.8
+python-pptx==0.6.23
+openpyxl==3.1.2
+xlrd==2.0.1
+markdown==3.6
+
+# OCR and image processing (for PDF with images)
+rapidocr-onnxruntime==1.3.24
+opencv-python-headless==4.9.0.80
+
+# Data processing
+pandas==2.2.1
+networkx==3.2.1
+
+# Security and encoding
+PyJWT==2.8.0
+cryptography==44.0.1
+python-magic==0.4.27
+
+# Embeddings and ML
+sentence_transformers==3.1.1
+
+# Utilities
+python-dotenv==1.0.1
+aiofiles==23.2.1
+pydantic==2.9.2
+
+# Document conversion (conditional - only if pypandoc features are used)
+# pypandoc==1.13

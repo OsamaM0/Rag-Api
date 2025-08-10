@@ -39,7 +39,6 @@ def dummy_pool(monkeypatch):
     return DummyPool()
 
 
-import asyncio
 
 
 @pytest.mark.asyncio

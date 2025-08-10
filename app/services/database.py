@@ -187,17 +187,15 @@ async def ensure_vector_indexes():
     await ensure_three_table_schema()
 
 
-# Collection Operations - Streamlined
+# Collection Operations - Using Proper PK/FK Relationships
 async def create_collection(name: str, description: str = None, idx: str = None):
-    """Create a new collection with the three-table schema."""
+    """Create a new collection using UUID as primary key, idx as optional user metadata."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
-        if not idx:
-            idx = str(uuid.uuid4())
-        
-        # Generate UUID explicitly since the table might not have a default
+        # Generate UUID explicitly for primary key
         collection_uuid = str(uuid.uuid4())
         
+        # idx is now optional user-defined metadata, not a system identifier
         result = await conn.fetchrow("""
             INSERT INTO langchain_pg_collection (uuid, name, idx, description, created_at, updated_at)
             VALUES ($1, $2, $3, $4, NOW(), NOW())
@@ -206,8 +204,20 @@ async def create_collection(name: str, description: str = None, idx: str = None)
         return dict(result)
 
 
+async def get_collection_by_uuid(collection_uuid: str):
+    """Get collection by its UUID primary key."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow("""
+            SELECT uuid, idx, name, description, created_at, updated_at
+            FROM langchain_pg_collection 
+            WHERE uuid = $1
+        """, collection_uuid)
+        return dict(result) if result else None
+
+
 async def get_collection_by_idx(idx: str):
-    """Get collection by its idx."""
+    """Get collection by its idx (user-defined identifier) - DEPRECATED."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.fetchrow("""
@@ -234,8 +244,8 @@ async def get_all_collections(limit: int = 10, offset: int = 0):
         return [dict(row) for row in results], total
 
 
-async def update_collection(idx: str, name: str = None, description: str = None):
-    """Update collection by idx."""
+async def update_collection(collection_uuid: str, name: str = None, description: str = None, idx: str = None):
+    """Update collection by UUID primary key."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         updates = []
@@ -252,25 +262,51 @@ async def update_collection(idx: str, name: str = None, description: str = None)
             updates.append(f"description = ${param_count}")
             params.append(description)
             
+        if idx is not None:
+            param_count += 1
+            updates.append(f"idx = ${param_count}")
+            params.append(idx)
+            
         if not updates:
             return None
             
         param_count += 1
         updates.append(f"updated_at = NOW()")
-        params.append(idx)
+        params.append(collection_uuid)
         
         query = f"""
             UPDATE langchain_pg_collection 
             SET {', '.join(updates)}
-            WHERE idx = ${param_count}
+            WHERE uuid = ${param_count}
             RETURNING uuid, idx, name, description, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)
         return dict(result) if result else None
 
 
-async def delete_collection(idx: str):
-    """Delete collection by idx - cascades to documents and embeddings."""
+async def update_collection_by_idx(idx: str, name: str = None, description: str = None):
+    """Update collection by idx (user identifier) - DEPRECATED, use update_collection."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        # First get the UUID for the collection
+        collection = await get_collection_by_idx(idx)
+        if not collection:
+            return None
+        return await update_collection(collection['uuid'], name=name, description=description)
+
+
+async def delete_collection(collection_uuid: str):
+    """Delete collection by UUID primary key - cascades to documents and embeddings."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            DELETE FROM langchain_pg_collection WHERE uuid = $1
+        """, collection_uuid)
+        return result
+
+
+async def delete_collection_by_idx(idx: str):
+    """Delete collection by idx (user identifier) - DEPRECATED, use delete_collection."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute("""
@@ -279,14 +315,14 @@ async def delete_collection(idx: str):
         return result
 
 
-# Document Operations - Unified for full documents and vector chunks
+# Document Operations - Using Proper PK/FK Relationships
 async def create_document(
-    idx: str, collection_id: str, filename: str = None, 
+    collection_uuid: str, filename: str = None, idx: str = None,
     content: str = None, page_content: str = None, mimetype: str = None,
     description: str = None, save_pdf_path: bool = False, 
     auto_embed: bool = True, **kwargs
 ):
-    """Create a new document in the unified documents table."""
+    """Create a new document using UUID foreign key to collection."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         # Auto-detect binary_hash if content provided
@@ -311,14 +347,27 @@ async def create_document(
             RETURNING serial_id, idx, collection_id, filename, content, page_content, 
                      mimetype, binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
-        """, idx, collection_id, filename, content, page_content, mimetype, 
+        """, idx, collection_uuid, filename, content, page_content, mimetype, 
              binary_hash, description, page_number, pdf_path, keywords,
              metadata, file_id, user_id)
         return dict(result)
 
 
+async def get_document_by_uuid(document_uuid: str):
+    """Get document by its UUID primary key (serial_id)."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow("""
+            SELECT d.*, c.name as collection_name
+            FROM documents d
+            LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+            WHERE d.serial_id = $1
+        """, document_uuid)
+        return dict(result) if result else None
+
+
 async def get_document_by_idx(idx: str):
-    """Get document by its idx."""
+    """Get document by its idx (user-defined identifier) - DEPRECATED."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.fetchrow("""
@@ -331,20 +380,12 @@ async def get_document_by_idx(idx: str):
 
 
 async def get_document_by_serial_id(serial_id: str):
-    """Get document by its serial_id (UUID)."""
-    pool = await PSQLDatabase.get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.fetchrow("""
-            SELECT d.*, c.name as collection_name
-            FROM documents d
-            LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
-            WHERE d.serial_id = $1
-        """, serial_id)
-        return dict(result) if result else None
+    """Get document by its serial_id (UUID) - Alias for get_document_by_uuid."""
+    return await get_document_by_uuid(serial_id)
 
 
-async def update_document(idx: str, **kwargs):
-    """Update document by idx."""
+async def update_document(document_uuid: str, **kwargs):
+    """Update document by UUID primary key (serial_id)."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         updates = []
@@ -355,7 +396,7 @@ async def update_document(idx: str, **kwargs):
         if 'content' in kwargs and kwargs['content'] is not None:
             kwargs['binary_hash'] = hashlib.md5(kwargs['content'].encode()).hexdigest()
         
-        for field in ['filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
+        for field in ['idx', 'filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
                      'description', 'page_number', 'pdf_path', 'keywords', 'metadata']:
             if field in kwargs and kwargs[field] is not None:
                 param_count += 1
@@ -367,12 +408,12 @@ async def update_document(idx: str, **kwargs):
             
         param_count += 1
         updates.append(f"updated_at = NOW()")
-        params.append(idx)
+        params.append(document_uuid)
         
         query = f"""
             UPDATE documents 
             SET {', '.join(updates)}
-            WHERE idx = ${param_count}
+            WHERE serial_id = ${param_count}
             RETURNING serial_id, idx, collection_id, filename, content, page_content,
                      mimetype, binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
@@ -381,8 +422,29 @@ async def update_document(idx: str, **kwargs):
         return dict(result) if result else None
 
 
-async def delete_document(idx: str):
-    """Delete document by idx and cascade to embeddings."""
+async def update_document_by_idx(idx: str, **kwargs):
+    """Update document by idx (user identifier) - DEPRECATED, use update_document."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        # First get the document UUID
+        document = await get_document_by_idx(idx)
+        if not document:
+            return None
+        return await update_document(document['serial_id'], **kwargs)
+
+
+async def delete_document(document_uuid: str):
+    """Delete document by UUID primary key (serial_id) and cascade to embeddings."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            DELETE FROM documents WHERE serial_id = $1
+        """, document_uuid)
+        return result
+
+
+async def delete_document_by_idx(idx: str):
+    """Delete document by idx (user identifier) - DEPRECATED, use delete_document."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute("""
@@ -391,8 +453,30 @@ async def delete_document(idx: str):
         return result
 
 
-async def get_documents_by_collection(collection_idx: str, limit: int = 10, offset: int = 0):
-    """Get documents by collection idx with pagination."""
+async def get_documents_by_collection(collection_uuid: str, limit: int = 10, offset: int = 0):
+    """Get documents by collection UUID with pagination."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        # Get documents
+        results = await conn.fetch("""
+            SELECT d.*, c.name as collection_name
+            FROM documents d
+            LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+            WHERE d.collection_id = $1
+            ORDER BY d.created_at DESC
+            LIMIT $2 OFFSET $3
+        """, collection_uuid, limit, offset)
+        
+        # Get total count
+        total = await conn.fetchval("""
+            SELECT COUNT(*) FROM documents WHERE collection_id = $1
+        """, collection_uuid)
+        
+        return [dict(row) for row in results], total
+
+
+async def get_documents_by_collection_idx(collection_idx: str, limit: int = 10, offset: int = 0):
+    """Get documents by collection idx (user identifier) - DEPRECATED."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         # Get collection first
@@ -403,22 +487,7 @@ async def get_documents_by_collection(collection_idx: str, limit: int = 10, offs
         if not collection:
             return None, 0
             
-        # Get documents
-        results = await conn.fetch("""
-            SELECT d.*, c.name as collection_name
-            FROM documents d
-            LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
-            WHERE d.collection_id = $1
-            ORDER BY d.created_at DESC
-            LIMIT $2 OFFSET $3
-        """, collection['uuid'], limit, offset)
-        
-        # Get total count
-        total = await conn.fetchval("""
-            SELECT COUNT(*) FROM documents WHERE collection_id = $1
-        """, collection['uuid'])
-        
-        return [dict(row) for row in results], total
+        return await get_documents_by_collection(collection['uuid'], limit, offset)
 
 
 async def get_all_documents(limit: int = 10, offset: int = 0, user_id: str = None, file_id: str = None):
@@ -464,12 +533,12 @@ async def get_all_documents(limit: int = 10, offset: int = 0, user_id: str = Non
         return documents, count_results
 
 
-# Embedding Operations - Direct PG Vector table operations
+# Embedding Operations - Using Proper PK/FK Relationships
 async def create_embedding(
     custom_id: str, embedding: list, document_text: str, 
-    document_id: str = None, collection_id: str = None, metadata: dict = None
+    document_uuid: str = None, collection_uuid: str = None, metadata: dict = None
 ):
-    """Create an embedding directly in the langchain_pg_embedding table."""
+    """Create an embedding using UUID foreign keys."""
     import json
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
@@ -485,7 +554,7 @@ async def create_embedding(
             )
             VALUES (gen_random_uuid(), $1, $2::vector, $3, $4, $5, $6::jsonb, NOW())
             RETURNING uuid, custom_id, embedding, document, document_id, collection_id, cmetadata, created_at
-        """, custom_id, embedding_str, document_text, document_id, collection_id, metadata_json)
+        """, custom_id, embedding_str, document_text, document_uuid, collection_uuid, metadata_json)
         return dict(result)
 
 
@@ -501,8 +570,8 @@ async def get_embedding_by_id(embedding_id: str):
         return dict(result) if result else None
 
 
-async def get_embeddings_by_document(document_id: str):
-    """Get all embeddings for a specific document."""
+async def get_embeddings_by_document(document_uuid: str):
+    """Get all embeddings for a specific document UUID."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         results = await conn.fetch("""
@@ -510,7 +579,7 @@ async def get_embeddings_by_document(document_id: str):
             FROM langchain_pg_embedding 
             WHERE document_id = $1
             ORDER BY created_at ASC
-        """, document_id)
+        """, document_uuid)
         return [dict(row) for row in results]
 
 
@@ -546,9 +615,9 @@ async def delete_embedding(embedding_id: str):
 
 async def similarity_search_embeddings(
     query_embedding: list, k: int = 4, filter_metadata: dict = None,
-    collection_id: str = None, document_id: str = None
+    collection_uuid: str = None, document_uuid: str = None
 ):
-    """Perform similarity search on embeddings with optional filters."""
+    """Perform similarity search on embeddings using UUID foreign keys."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
         # Convert embedding list to string format for PostgreSQL vector type
@@ -559,15 +628,15 @@ async def similarity_search_embeddings(
         params = [query_embedding_str, k]
         param_count = 2
         
-        if collection_id:
+        if collection_uuid:
             param_count += 1
             where_conditions.append(f"collection_id = ${param_count}")
-            params.append(collection_id)
+            params.append(collection_uuid)
             
-        if document_id:
+        if document_uuid:
             param_count += 1
             where_conditions.append(f"document_id = ${param_count}")
-            params.append(document_id)
+            params.append(document_uuid)
             
         if filter_metadata:
             param_count += 1
@@ -603,19 +672,34 @@ async def pg_health_check() -> bool:
         return False
 
 
-# For backwards compatibility and easier imports
+# For backwards compatibility and easier imports  
 database = {
+    # New UUID-based methods (recommended)
     'create_collection': create_collection,
-    'get_collection': get_collection_by_idx,
-    'get_all_collections': get_all_collections,
+    'get_collection': get_collection_by_uuid,
+    'get_collection_by_uuid': get_collection_by_uuid,
     'update_collection': update_collection,
     'delete_collection': delete_collection,
     'create_document': create_document,
-    'get_document': get_document_by_idx,
-    'get_all_documents': get_all_documents,
-    'get_documents_by_collection': get_documents_by_collection,
+    'get_document': get_document_by_uuid,
+    'get_document_by_uuid': get_document_by_uuid,
     'update_document': update_document,
     'delete_document': delete_document,
+    'get_documents_by_collection': get_documents_by_collection,
     'create_embedding': create_embedding,
     'similarity_search_embeddings': similarity_search_embeddings,
+    
+    # Legacy idx-based methods (deprecated)
+    'get_collection_by_idx': get_collection_by_idx,
+    'update_collection_by_idx': update_collection_by_idx,
+    'delete_collection_by_idx': delete_collection_by_idx,
+    'get_document_by_idx': get_document_by_idx,
+    'get_document_by_serial_id': get_document_by_serial_id,
+    'update_document_by_idx': update_document_by_idx,
+    'delete_document_by_idx': delete_document_by_idx,
+    'get_documents_by_collection_idx': get_documents_by_collection_idx,
+    
+    # Other operations
+    'get_all_collections': get_all_collections,
+    'get_all_documents': get_all_documents,
 }

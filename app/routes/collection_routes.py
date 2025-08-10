@@ -10,12 +10,16 @@ from app.models import (
     CollectionResponse,
     SuccessResponse,
     BulkOperationResponse,
-    PaginationParams,
     PaginatedResponse
 )
 from app.services import database
 
 router = APIRouter(prefix="/collections", tags=["Collections"])
+
+
+def filter_none_values(data: dict) -> dict:
+    """Remove None values from dictionary to support partial updates."""
+    return {k: v for k, v in data.items() if v is not None}
 
 
 # Define a specific response model for paginated collections
@@ -38,11 +42,13 @@ async def create_collection(
     try:
         result = await database.create_collection(
             name=collection.name,
-            description=collection.description
+            description=collection.description,
+            idx=collection.idx  # User-defined identifier (optional)
         )
         
         response = CollectionResponse(
-            id=result['idx'],
+            id=result['uuid'],  # UUID as primary identifier
+            idx=result.get('idx'),  # User-defined identifier
             name=result['name'],
             description=result['description'],
             metadata=collection.metadata or {},
@@ -50,7 +56,7 @@ async def create_collection(
             updated_at=result['updated_at']
         )
         
-        logger.info(f"Collection created: {collection.name} with ID: {result['idx']}")
+        logger.info(f"Collection created: {collection.name} with UUID: {result['uuid']}")
         return response
         
     except Exception as e:
@@ -79,7 +85,8 @@ async def list_collections(
         collection_responses = []
         for collection in collections:
             collection_responses.append(CollectionResponse(
-                id=collection['idx'],
+                id=collection['uuid'],  # UUID as primary identifier
+                idx=collection.get('idx'),  # User-defined identifier
                 name=collection['name'],
                 description=collection['description'],
                 metadata={},  # Collections don't store complex metadata in this schema
@@ -106,14 +113,19 @@ async def list_collections(
 
 @router.get("/{collection_id}", response_model=CollectionResponse)
 async def get_collection(collection_id: str, request: Request):
-    """Get a specific collection by ID."""
+    """Get a specific collection by ID (accepts both UUID and idx)."""
     try:
-        collection = await database.get_collection_by_idx(collection_id)
+        # Try to get by UUID first, then fall back to idx for backward compatibility
+        collection = await database.get_collection_by_uuid(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_idx(collection_id)
+            
         if not collection:
             raise HTTPException(status_code=404, detail="Collection not found")
             
         return CollectionResponse(
-            id=collection['idx'],
+            id=collection['uuid'],  # UUID as primary identifier
+            idx=collection.get('idx'),  # User-defined identifier
             name=collection['name'],
             description=collection['description'],
             metadata={},
@@ -129,23 +141,37 @@ async def get_collection(collection_id: str, request: Request):
 
 
 @router.put("/{collection_id}", response_model=CollectionResponse)
+@router.patch("/{collection_id}", response_model=CollectionResponse)
 async def update_collection(
     collection_id: str,
     collection_update: CollectionUpdate,
     request: Request
 ):
-    """Update a collection."""
+    """Update a collection (supports both PUT and PATCH for partial updates)."""
     try:
-        result = await database.update_collection(
-            idx=collection_id,
-            name=collection_update.name,
-            description=collection_update.description
-        )
-        if not result:
-            raise HTTPException(status_code=404, detail="Collection not found")
+        # Build update parameters - only include fields that are not None
+        update_data = collection_update.model_dump(exclude_unset=True, exclude_none=True)
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No valid fields provided for update")
+        
+        # Try to get collection by UUID first, then by idx for backward compatibility
+        collection = await database.get_collection_by_uuid(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_idx(collection_id)
             
+        if not collection:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        
+        # Update using UUID
+        result = await database.update_collection(
+            collection_uuid=collection['uuid'],
+            **update_data
+        )
+        
         return CollectionResponse(
-            id=result['idx'],
+            id=result['uuid'],  # UUID as primary identifier
+            idx=result.get('idx'),  # User-defined identifier
             name=result['name'],
             description=result['description'],
             metadata=collection_update.metadata or {},
@@ -164,13 +190,18 @@ async def update_collection(
 async def delete_collection(collection_id: str, request: Request):
     """Delete a collection and all its documents and embeddings."""
     try:
-        collection = await database.get_collection_by_idx(collection_id)
+        # Try to get collection by UUID first, then by idx for backward compatibility
+        collection = await database.get_collection_by_uuid(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_idx(collection_id)
+            
         if not collection:
             raise HTTPException(status_code=404, detail="Collection not found")
-            
-        await database.delete_collection(collection_id)
-        logger.info(f"Collection deleted: {collection_id}")
-        return SuccessResponse(message=f"Collection {collection_id} deleted successfully")
+        
+        # Delete using UUID
+        await database.delete_collection(collection['uuid'])
+        logger.info(f"Collection deleted: {collection['name']} (UUID: {collection['uuid']})")
+        return SuccessResponse(message=f"Collection {collection['name']} deleted successfully")
             
     except HTTPException:
         raise
@@ -193,16 +224,21 @@ async def bulk_delete_collections(
         
         for collection_id in collection_ids:
             try:
-                collection = await database.get_collection_by_idx(collection_id)
+                # Try to get collection by UUID first, then by idx for backward compatibility
+                collection = await database.get_collection_by_uuid(collection_id)
+                if not collection:
+                    collection = await database.get_collection_by_idx(collection_id)
+                    
                 if not collection:
                     failed_count += 1
                     failed_ids.append(collection_id)
                     continue
-                    
-                await database.delete_collection(collection_id)
+                
+                # Delete using UUID
+                await database.delete_collection(collection['uuid'])
                 success_count += 1
                 success_ids.append(collection_id)
-                logger.info(f"Collection deleted: {collection_id}")
+                logger.info(f"Collection deleted: {collection['name']} (UUID: {collection['uuid']})")
             except Exception as e:
                 failed_count += 1
                 failed_ids.append(collection_id)
@@ -231,13 +267,18 @@ async def get_collection_documents(
 ):
     """Get all documents in a collection."""
     try:
+        # Try to get collection by UUID first, then by idx for backward compatibility
+        collection = await database.get_collection_by_uuid(collection_id)
+        if not collection:
+            collection = await database.get_collection_by_idx(collection_id)
+            
+        if not collection:
+            raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
+        
         offset = (page - 1) * page_size
         documents, total = await database.get_documents_by_collection(
-            collection_id, limit=page_size, offset=offset
+            collection['uuid'], limit=page_size, offset=offset
         )
-        
-        if documents is None:
-            raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
         
         total_pages = (total + page_size - 1) // page_size
         

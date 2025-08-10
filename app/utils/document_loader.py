@@ -1,4 +1,11 @@
-# app/utils/document_loader.py
+"""
+Document Loader Utilities.
+
+This module provides utilities for loading and processing various document types
+including PDFs, text files, CSV files, and other formats. It includes encoding
+detection, text cleaning, and document processing capabilities.
+"""
+
 import os
 import codecs
 import tempfile
@@ -51,7 +58,8 @@ def cleanup_temp_encoding_file(loader) -> None:
     """
     Clean up temporary UTF-8 file if it was created for encoding conversion.
 
-    :param loader: The document loader that may have created a temporary file
+    Args:
+        loader: The document loader that may have created a temporary file.
     """
     if hasattr(loader, "_temp_filepath"):
         try:
@@ -61,6 +69,18 @@ def cleanup_temp_encoding_file(loader) -> None:
 
 
 def get_loader(filename: str, file_content_type: str, filepath: str):
+    """
+    Get the appropriate document loader for a given file.
+    
+    Args:
+        filename: Name of the file.
+        file_content_type: MIME type of the file.
+        filepath: Path to the file.
+        
+    Returns:
+        Tuple of (loader, known_type) where loader is the document loader
+        and known_type indicates if the file type is recognized.
+    """
     file_ext = filename.split(".")[-1].lower()
     known_type = True
 
@@ -134,35 +154,35 @@ def get_loader(filename: str, file_content_type: str, filepath: str):
 def clean_text(text: str) -> str:
     """
     Remove NUL (0x00) characters from a string.
-
-    :param text: The original text with potential NUL characters.
-    :return: Cleaned text without NUL characters.
+    
+    Args:
+        text: Input text that may contain NUL characters.
+        
+    Returns:
+        Cleaned text with NUL characters removed.
     """
     return text.replace("\x00", "")
 
 
 def process_documents(documents: List[Document]) -> str:
+    """
+    Process a list of documents and concatenate their content with page markers.
+    
+    Args:
+        documents: List of Document objects to process.
+        
+    Returns:
+        Concatenated text content with page markers.
+    """
     processed_text = ""
-    last_page: Optional[int] = None
-    doc_basename = ""
-
+    
     for doc in documents:
-        if "source" in doc.metadata:
-            doc_basename = doc.metadata["source"].split("/")[-1]
-            break
-
-    processed_text += f"{doc_basename}\n"
-
-    for doc in documents:
-        current_page = doc.metadata.get("page")
-        if current_page and current_page != last_page:
+        processed_text += clean_text(doc.page_content)
+        
+        # Add page markers for PDF documents
+        if "page" in doc.metadata:
             processed_text += f"\n# PAGE {doc.metadata['page']}\n\n"
-            last_page = current_page
-
-        new_content = doc.page_content
-        if processed_text.endswith(new_content[:CHUNK_OVERLAP]):
-            processed_text += new_content[CHUNK_OVERLAP:]
         else:
-            processed_text += new_content
-
-    return processed_text.strip()
+            processed_text += "\n\n"
+    
+    return processed_text

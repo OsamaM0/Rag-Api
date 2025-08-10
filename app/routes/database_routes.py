@@ -1,7 +1,7 @@
 # app/routes/database_routes.py
 import traceback
-from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Request, Query, status
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Request, Query
 from app.config import logger
 from app.models import (
     DatabaseStatsResponse,

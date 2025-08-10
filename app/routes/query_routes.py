@@ -2,7 +2,7 @@
 import traceback
 from typing import List
 from functools import lru_cache
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request
 from app.config import logger, vector_store
 from app.models import (
     QueryRequestBody,

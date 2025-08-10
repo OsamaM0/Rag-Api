@@ -1,6 +1,6 @@
 # app/routes/health_routes.py
 import traceback
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from app.config import logger
 from app.utils.health import is_health_ok
 

@@ -1,7 +1,7 @@
 # app/routes/pgvector_routes.py
 import traceback
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Request, Query, status
+from fastapi import APIRouter, HTTPException, Request, Query
 from app.config import logger
 from app.services.database import PSQLDatabase
 from app.models import SuccessResponse

@@ -1,12 +1,21 @@
-# app/constants.py
+"""
+Application Constants.
+
+This module defines constants and enums used throughout the application,
+including message templates and error message definitions.
+"""
+
 from enum import Enum
 
 
 class MESSAGES(str, Enum):
+    """Standard application messages."""
     DEFAULT = lambda msg="": f"{msg if msg else ''}"
 
 
 class ERROR_MESSAGES(str, Enum):
+    """Error message templates for the application."""
+    
     def __str__(self) -> str:
         return super().__str__()
 
