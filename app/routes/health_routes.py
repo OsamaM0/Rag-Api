@@ -38,6 +38,7 @@ async def root():
             "redoc": "/redoc",
             "collections": "/collections",
             "documents": "/documents",
+            "document_blocks": "/document-blocks",
             "document_content": "/document-content", 
             "embeddings": "/embeddings",
             "queries": "/queries",

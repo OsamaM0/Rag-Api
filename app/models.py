@@ -204,6 +204,65 @@ class SortOrder(str, Enum):
     desc = "desc"
 
 
+# Document Blocks Models
+class DocumentBlockCreate(BaseModel):
+    block_idx: int = Field(..., description="Block index (order)")
+    name: str = Field(..., description="Block name/identifier")
+    content: Optional[str] = Field(None, description="Block content")
+    level: int = Field(..., description="Hierarchical level")
+    page_idx: int = Field(..., description="Page index")
+    tag: str = Field(..., description="Block tag (para, header, etc.)")
+    block_class: Optional[str] = Field(None, description="Block class")
+    x0: Optional[float] = Field(None, description="Left coordinate")
+    y0: Optional[float] = Field(None, description="Bottom coordinate")
+    x1: Optional[float] = Field(None, description="Right coordinate")
+    y1: Optional[float] = Field(None, description="Top coordinate")
+    parent_idx: Optional[int] = Field(None, description="Parent block index")
+    content_type: str = Field(default="regular", description="Content type")
+    section_type: Optional[str] = Field(None, description="Section type")
+    demand_priority: Optional[int] = Field(None, description="Demand priority")
+
+
+class DocumentBlockResponse(BaseModel):
+    id: str = Field(..., description="Block UUID")
+    block_idx: int = Field(..., description="Block index (order)")
+    document_id: str = Field(..., description="Document UUID")
+    name: str = Field(..., description="Block name/identifier")
+    content: Optional[str] = Field(None, description="Block content")
+    level: int = Field(..., description="Hierarchical level")
+    page_idx: int = Field(..., description="Page index")
+    tag: str = Field(..., description="Block tag")
+    block_class: Optional[str] = Field(None, description="Block class")
+    x0: Optional[float] = Field(None, description="Left coordinate")
+    y0: Optional[float] = Field(None, description="Bottom coordinate")
+    x1: Optional[float] = Field(None, description="Right coordinate")
+    y1: Optional[float] = Field(None, description="Top coordinate")
+    parent_idx: Optional[int] = Field(None, description="Parent block index")
+    content_type: str = Field(default="regular", description="Content type")
+    section_type: Optional[str] = Field(None, description="Section type")
+    demand_priority: Optional[int] = Field(None, description="Demand priority")
+    created_at: Optional[datetime] = None
+
+
+class DocumentBlockUpdate(BaseModel):
+    """Model for partial document block updates."""
+    name: Optional[str] = Field(None, description="Block name/identifier")
+    content: Optional[str] = Field(None, description="Block content")
+    level: Optional[int] = Field(None, description="Hierarchical level")
+    tag: Optional[str] = Field(None, description="Block tag")
+    block_class: Optional[str] = Field(None, description="Block class")
+    content_type: Optional[str] = Field(None, description="Content type")
+    section_type: Optional[str] = Field(None, description="Section type")
+    demand_priority: Optional[int] = Field(None, description="Demand priority")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DocumentBlocksBulkCreate(BaseModel):
+    document_id: str = Field(..., description="Document UUID")
+    blocks: List[DocumentBlockCreate] = Field(..., description="List of blocks to create")
+
+
 # Pagination Models
 class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number")

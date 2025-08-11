@@ -838,6 +838,357 @@ async def similarity_search_embeddings(
         raise
 
 
+# Document Blocks functionality
+async def ensure_document_blocks_schema():
+    """Ensure the document blocks table schema exists."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS rag_document_blocks (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                block_idx INTEGER NOT NULL,
+                document_id UUID REFERENCES documents(uuid) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                content TEXT,
+                level INTEGER NOT NULL,
+                page_idx INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                block_class TEXT,
+                x0 FLOAT,
+                y0 FLOAT,
+                x1 FLOAT,
+                y1 FLOAT,
+                parent_idx INTEGER,
+                content_type TEXT DEFAULT 'regular',
+                section_type TEXT,
+                demand_priority INTEGER,
+                content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', COALESCE(content, ''))) STORED,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(document_id, block_idx)
+            );
+        """)
+        
+        # Create indexes
+        indexes_to_create = [
+            "CREATE INDEX IF NOT EXISTS idx_document_blocks_content_tsv ON rag_document_blocks USING gin(content_tsv);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_content_type ON rag_document_blocks(content_type);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_section_type ON rag_document_blocks(section_type);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_demand_priority ON rag_document_blocks(demand_priority);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_document_id ON rag_document_blocks(document_id);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_block_idx ON rag_document_blocks(block_idx);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_parent_idx ON rag_document_blocks(parent_idx);",
+            "CREATE INDEX IF NOT EXISTS idx_rag_blocks_page_idx ON rag_document_blocks(page_idx);",
+        ]
+        
+        for index_sql in indexes_to_create:
+            try:
+                await conn.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Could not create index: {e}")
+        
+        logger.info("Document blocks schema ensured")
+
+
+async def create_document_block(
+    document_id: str,
+    block_idx: int,
+    name: str,
+    content: str = None,
+    level: int = 0,
+    page_idx: int = 0,
+    tag: str = "para",
+    block_class: str = None,
+    x0: float = None,
+    y0: float = None,
+    x1: float = None,
+    y1: float = None,
+    parent_idx: int = None,
+    content_type: str = "regular",
+    section_type: str = None,
+    demand_priority: int = None
+) -> dict:
+    """Create a new document block."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # First ensure the document exists
+            doc_exists = await conn.fetchval(
+                "SELECT uuid FROM documents WHERE uuid = $1", 
+                uuid.UUID(document_id)
+            )
+            if not doc_exists:
+                raise ValueError(f"Document with ID {document_id} not found")
+            
+            result = await conn.fetchrow("""
+                INSERT INTO rag_document_blocks 
+                (document_id, block_idx, name, content, level, page_idx, tag, block_class,
+                 x0, y0, x1, y1, parent_idx, content_type, section_type, demand_priority)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                RETURNING *
+            """, 
+            uuid.UUID(document_id), block_idx, name, content, level, page_idx, tag, block_class,
+            x0, y0, x1, y1, parent_idx, content_type, section_type, demand_priority)
+            
+            if result:
+                return dict(result)
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error creating document block: {str(e)}")
+            raise
+
+
+async def create_document_blocks_bulk(document_id: str, blocks: list) -> list:
+    """Create multiple document blocks in a single transaction."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # First ensure the document exists
+            doc_exists = await conn.fetchval(
+                "SELECT uuid FROM documents WHERE uuid = $1", 
+                uuid.UUID(document_id)
+            )
+            if not doc_exists:
+                raise ValueError(f"Document with ID {document_id} not found")
+            
+            # Prepare bulk insert data
+            bulk_data = []
+            for block in blocks:
+                bulk_data.append((
+                    uuid.UUID(document_id),
+                    block.get("block_idx"),
+                    block.get("name"),
+                    block.get("content"),
+                    block.get("level", 0),
+                    block.get("page_idx", 0),
+                    block.get("tag", "para"),
+                    block.get("block_class"),
+                    block.get("x0"),
+                    block.get("y0"),
+                    block.get("x1"),
+                    block.get("y1"),
+                    block.get("parent_idx"),
+                    block.get("content_type", "regular"),
+                    block.get("section_type"),
+                    block.get("demand_priority")
+                ))
+            
+            # Use executemany for bulk insert
+            await conn.executemany("""
+                INSERT INTO rag_document_blocks 
+                (document_id, block_idx, name, content, level, page_idx, tag, block_class,
+                 x0, y0, x1, y1, parent_idx, content_type, section_type, demand_priority)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                ON CONFLICT (document_id, block_idx) DO UPDATE SET
+                name = EXCLUDED.name,
+                content = EXCLUDED.content,
+                level = EXCLUDED.level,
+                page_idx = EXCLUDED.page_idx,
+                tag = EXCLUDED.tag,
+                block_class = EXCLUDED.block_class,
+                x0 = EXCLUDED.x0,
+                y0 = EXCLUDED.y0,
+                x1 = EXCLUDED.x1,
+                y1 = EXCLUDED.y1,
+                parent_idx = EXCLUDED.parent_idx,
+                content_type = EXCLUDED.content_type,
+                section_type = EXCLUDED.section_type,
+                demand_priority = EXCLUDED.demand_priority
+            """, bulk_data)
+            
+            # Return the created blocks
+            created_blocks = await conn.fetch("""
+                SELECT * FROM rag_document_blocks 
+                WHERE document_id = $1
+                ORDER BY block_idx
+            """, uuid.UUID(document_id))
+            
+            return [dict(block) for block in created_blocks]
+            
+        except Exception as e:
+            logger.error(f"Error creating document blocks bulk: {str(e)}")
+            raise
+
+
+async def get_document_blocks_by_document(
+    document_id: str, 
+    limit: int = 100, 
+    offset: int = 0
+) -> tuple:
+    """Get all blocks for a document with pagination."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Get total count
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM rag_document_blocks WHERE document_id = $1",
+                uuid.UUID(document_id)
+            )
+            
+            # Get blocks with pagination
+            blocks = await conn.fetch("""
+                SELECT * FROM rag_document_blocks 
+                WHERE document_id = $1
+                ORDER BY block_idx
+                LIMIT $2 OFFSET $3
+            """, uuid.UUID(document_id), limit, offset)
+            
+            return [dict(block) for block in blocks], total
+            
+        except Exception as e:
+            logger.error(f"Error getting document blocks: {str(e)}")
+            raise
+
+
+async def get_document_block_by_id(block_id: str) -> dict:
+    """Get a document block by its ID."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchrow(
+                "SELECT * FROM rag_document_blocks WHERE id = $1",
+                uuid.UUID(block_id)
+            )
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Error getting document block by ID: {str(e)}")
+            raise
+
+
+async def update_document_block(block_id: str, **updates) -> dict:
+    """Update a document block."""
+    if not updates:
+        raise ValueError("No updates provided")
+        
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Build dynamic update query
+            set_clauses = []
+            params = []
+            param_idx = 1
+            
+            for field, value in updates.items():
+                if field in ['name', 'content', 'level', 'tag', 'block_class', 
+                           'content_type', 'section_type', 'demand_priority']:
+                    set_clauses.append(f"{field} = ${param_idx}")
+                    params.append(value)
+                    param_idx += 1
+            
+            if not set_clauses:
+                raise ValueError("No valid fields to update")
+            
+            params.append(uuid.UUID(block_id))
+            
+            query = f"""
+                UPDATE rag_document_blocks 
+                SET {', '.join(set_clauses)}
+                WHERE id = ${param_idx}
+                RETURNING *
+            """
+            
+            result = await conn.fetchrow(query, *params)
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Error updating document block: {str(e)}")
+            raise
+
+
+async def delete_document_block(block_id: str) -> bool:
+    """Delete a document block."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                "DELETE FROM rag_document_blocks WHERE id = $1",
+                uuid.UUID(block_id)
+            )
+            return result == "DELETE 1"
+            
+        except Exception as e:
+            logger.error(f"Error deleting document block: {str(e)}")
+            raise
+
+
+async def delete_document_blocks_by_document(document_id: str) -> int:
+    """Delete all blocks for a document."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                "DELETE FROM rag_document_blocks WHERE document_id = $1",
+                uuid.UUID(document_id)
+            )
+            # Extract number from result string "DELETE X"
+            return int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+            
+        except Exception as e:
+            logger.error(f"Error deleting document blocks: {str(e)}")
+            raise
+
+
+async def search_document_blocks(
+    document_id: str = None,
+    query: str = None,
+    content_type: str = None,
+    section_type: str = None,
+    limit: int = 20,
+    offset: int = 0
+) -> tuple:
+    """Search document blocks with various filters."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            where_clauses = []
+            params = []
+            param_idx = 1
+            
+            if document_id:
+                where_clauses.append(f"document_id = ${param_idx}")
+                params.append(uuid.UUID(document_id))
+                param_idx += 1
+            
+            if query:
+                where_clauses.append(f"content_tsv @@ to_tsquery('english', ${param_idx})")
+                params.append(query)
+                param_idx += 1
+            
+            if content_type:
+                where_clauses.append(f"content_type = ${param_idx}")
+                params.append(content_type)
+                param_idx += 1
+            
+            if section_type:
+                where_clauses.append(f"section_type = ${param_idx}")
+                params.append(section_type)
+                param_idx += 1
+            
+            where_clause = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+            
+            # Count query
+            count_query = f"SELECT COUNT(*) FROM rag_document_blocks{where_clause}"
+            total = await conn.fetchval(count_query, *params)
+            
+            # Search query
+            params.extend([limit, offset])
+            search_query = f"""
+                SELECT * FROM rag_document_blocks
+                {where_clause}
+                ORDER BY block_idx
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """
+            
+            blocks = await conn.fetch(search_query, *params)
+            
+            return [dict(block) for block in blocks], total
+            
+        except Exception as e:
+            logger.error(f"Error searching document blocks: {str(e)}")
+            raise
+
+
 async def pg_health_check() -> bool:
     """Check if PostgreSQL database is healthy."""
     try:
@@ -868,6 +1219,17 @@ database = {
     'get_documents_by_collection': get_documents_by_collection,
     'create_embedding': create_embedding,
     'similarity_search_embeddings': similarity_search_embeddings,
+    
+    # Document Blocks methods
+    'create_document_block': create_document_block,
+    'create_document_blocks_bulk': create_document_blocks_bulk,
+    'get_document_blocks_by_document': get_document_blocks_by_document,
+    'get_document_block_by_id': get_document_block_by_id,
+    'update_document_block': update_document_block,
+    'delete_document_block': delete_document_block,
+    'delete_document_blocks_by_document': delete_document_blocks_by_document,
+    'search_document_blocks': search_document_blocks,
+    'ensure_document_blocks_schema': ensure_document_blocks_schema,
     
     # Legacy idx-based methods (deprecated)
     'get_collection_by_idx': get_collection_by_idx,
