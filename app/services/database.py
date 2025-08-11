@@ -212,19 +212,31 @@ async def create_collection(name: str, description: str = None, idx: str = None,
             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
             RETURNING uuid, idx, custom_id, name, description, created_at, updated_at
         """, collection_uuid, name, idx, custom_id, description)
-        return dict(result)
+        
+        # Convert the result to a dict and ensure UUID is string
+        result_dict = dict(result)
+        result_dict['uuid'] = str(result_dict['uuid'])
+        return result_dict
 
 
 async def get_collection_by_uuid(collection_uuid: str):
     """Get collection by its UUID primary key."""
     pool = await PSQLDatabase.get_pool()
     async with pool.acquire() as conn:
-        result = await conn.fetchrow("""
-            SELECT uuid, idx, custom_id, name, description, created_at, updated_at
-            FROM langchain_pg_collection 
-            WHERE uuid = $1
-        """, collection_uuid)
-        return dict(result) if result else None
+        try: 
+            result = await conn.fetchrow("""
+                SELECT uuid, idx, custom_id, name, description, created_at, updated_at
+                FROM langchain_pg_collection 
+                WHERE uuid = $1
+            """, collection_uuid)
+            if result:
+                result_dict = dict(result)
+                result_dict['uuid'] = str(result_dict['uuid'])
+                return result_dict
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get collection by UUID | ID: {collection_uuid} | Error: {str(e)}")
+            return None
 
 
 async def get_collection_by_idx(idx: str):
@@ -236,7 +248,11 @@ async def get_collection_by_idx(idx: str):
             FROM langchain_pg_collection 
             WHERE idx = $1
         """, idx)
-        return dict(result) if result else None
+        if result:
+            result_dict = dict(result)
+            result_dict['uuid'] = str(result_dict['uuid'])
+            return result_dict
+        return None
 
 
 async def get_collection_by_custom_id(custom_id: str):
@@ -248,7 +264,11 @@ async def get_collection_by_custom_id(custom_id: str):
             FROM langchain_pg_collection 
             WHERE custom_id = $1
         """, custom_id)
-        return dict(result) if result else None
+        if result:
+            result_dict = dict(result)
+            result_dict['uuid'] = str(result_dict['uuid'])
+            return result_dict
+        return None
 
 
 async def get_all_collections(limit: int = 10, offset: int = 0):
@@ -264,8 +284,14 @@ async def get_all_collections(limit: int = 10, offset: int = 0):
         
         total = await conn.fetchval("SELECT COUNT(*) FROM langchain_pg_collection")
         
-        return [dict(row) for row in results], total
-
+        # Convert UUIDs to strings for all results
+        collections = []
+        for row in results:
+            row_dict = dict(row)
+            row_dict['uuid'] = str(row_dict['uuid'])
+            collections.append(row_dict)
+        
+        return collections, total
 
 async def update_collection(collection_uuid: str, name: str = None, description: str = None, idx: str = None, custom_id: str = None):
     """Update collection by UUID primary key."""
@@ -309,7 +335,11 @@ async def update_collection(collection_uuid: str, name: str = None, description:
             RETURNING uuid, idx, custom_id, name, description, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)
-        return dict(result) if result else None
+        if result:
+            result_dict = dict(result)
+            result_dict['uuid'] = str(result_dict['uuid'])
+            return result_dict
+        return None
 
 
 async def update_collection_by_idx(idx: str, name: str = None, description: str = None):

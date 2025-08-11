@@ -48,7 +48,7 @@ async def create_collection(
         )
         
         response = CollectionResponse(
-            id=result['uuid'],  # UUID as primary identifier
+            id=str(result['uuid']),  # Convert UUID to string
             idx=result.get('idx'),  # User-defined identifier
             custom_id=result.get('custom_id'),  # User-defined custom ID
             name=result['name'],
@@ -87,7 +87,7 @@ async def list_collections(
         collection_responses = []
         for collection in collections:
             collection_responses.append(CollectionResponse(
-                id=collection['uuid'],  # UUID as primary identifier
+                id=str(collection['uuid']),  # Convert UUID to string
                 idx=collection.get('idx'),  # User-defined identifier
                 custom_id=collection.get('custom_id'),  # User-defined custom ID
                 name=collection['name'],
@@ -129,7 +129,7 @@ async def get_collection(collection_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Collection not found")
             
         return CollectionResponse(
-            id=collection['uuid'],  # UUID as primary identifier
+            id=str(collection['uuid']),  # Convert UUID to string
             idx=collection.get('idx'),  # User-defined identifier
             custom_id=collection.get('custom_id'),  # User-defined custom ID
             name=collection['name'],
@@ -146,7 +146,6 @@ async def get_collection(collection_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to get collection: {str(e)}")
 
 
-@router.put("/{collection_id}", response_model=CollectionResponse)
 @router.patch("/{collection_id}", response_model=CollectionResponse)
 async def update_collection(
     collection_id: str,
@@ -178,7 +177,7 @@ async def update_collection(
         )
         
         return CollectionResponse(
-            id=result['uuid'],  # UUID as primary identifier
+            id=str(result['uuid']),  # Convert UUID to string
             idx=result.get('idx'),  # User-defined identifier
             custom_id=result.get('custom_id'),  # User-defined custom ID
             name=result['name'],
