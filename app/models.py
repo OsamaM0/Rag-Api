@@ -7,7 +7,7 @@ from datetime import datetime
 
 # Document Models - Using Proper PK/FK Relationships
 class DocumentResponse(BaseModel):
-    serial_id: str  # UUID primary key (system identifier)
+    uuid: str  # UUID primary key (system identifier)
     idx: Optional[str] = None  # User-defined identifier (optional)
     custom_id: Optional[str] = None  # User-defined custom ID (optional)
     filename: str

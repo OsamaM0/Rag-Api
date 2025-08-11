@@ -200,10 +200,10 @@ async def create_embeddings_for_document(
             }
             
             # Create embedding using the appropriate vector store
-            # Use the document's UUID (serial_id) as the document_uuid for proper foreign key relationship
+            # Use the document's UUID (uuid) as the document_uuid for proper foreign key relationship
             embedding_record = await create_vector_embedding(
                 content=chunk_text,
-                document_uuid=str(document['serial_id']),  # Use serial_id from documents table
+                document_uuid=str(document['uuid']),  # Use uuid from documents table
                 collection_uuid=str(document['collection_id']) if document.get('collection_id') else None,
                 metadata=chunk_metadata,
                 request=request
@@ -243,7 +243,7 @@ async def create_single_embedding(
         # Create embedding using the appropriate vector store
         embedding_record = await create_vector_embedding(
             content=embedding_request.text,
-            document_uuid=str(document['serial_id']),  # Use serial_id from documents table
+            document_uuid=str(document['uuid']),  # Use uuid from documents table
             collection_uuid=str(document['collection_id']) if document.get('collection_id') else None,
             metadata=embedding_request.metadata or {},
             request=request
@@ -284,8 +284,8 @@ async def list_embeddings(
             if not document:
                 raise HTTPException(status_code=404, detail="Document not found")
             
-            # Get embeddings for specific document using its UUID (serial_id)
-            embeddings = await get_embeddings_by_document(str(document['serial_id']))
+            # Get embeddings for specific document using its UUID (uuid)
+            embeddings = await get_embeddings_by_document(str(document['uuid']))
             total = len(embeddings)
             # Apply pagination manually since database function doesn't support it
             embeddings = embeddings[offset:offset + page_size]
@@ -383,11 +383,11 @@ async def find_similar_embeddings_in_document(
         from app.config import embeddings
         query_embedding = embeddings.embed_query(text)
         
-        # Search only within this document using its UUID (serial_id)
+        # Search only within this document using its UUID (uuid)
         raw_results = await similarity_search_embeddings(
             query_embedding=query_embedding, 
             k=k, 
-            document_uuid=str(document['serial_id'])
+            document_uuid=str(document['uuid'])
         )
         
         # Convert to expected format
@@ -473,7 +473,7 @@ async def get_document_embeddings(
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        embeddings = await get_embeddings_by_document(str(document['serial_id']))
+        embeddings = await get_embeddings_by_document(str(document['uuid']))
         total = len(embeddings)
         # Apply pagination manually
         embeddings = embeddings[offset:offset + page_size]

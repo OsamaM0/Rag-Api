@@ -153,7 +153,7 @@ async def list_documents(
         response_items = []
         for doc in documents:
             response_items.append(DocumentResponse(
-                serial_id=str(doc['serial_id']),  # UUID as primary identifier
+                uuid=str(doc['uuid']),  # UUID as primary identifier
                 idx=doc.get('idx'),  # User-defined identifier
                 custom_id=doc.get('custom_id'),  # User-defined custom ID
                 filename=doc.get('filename', ''),
@@ -233,7 +233,7 @@ async def create_document_endpoint(
             raise HTTPException(status_code=500, detail="Failed to create document in database")
         
         return DocumentResponse(
-            serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
+            uuid=str(created_doc['uuid']),  # UUID as primary identifier
             idx=created_doc.get('idx'),  # User-defined identifier
             custom_id=created_doc.get('custom_id'),  # User-defined custom ID
             filename=created_doc.get('filename', ''),
@@ -349,7 +349,7 @@ async def create_document_with_upload(
                     # Don't fail the whole operation if embedding creation fails
             
             return DocumentResponse(
-                serial_id=str(created_doc['serial_id']),  # UUID as primary identifier
+                uuid=str(created_doc['uuid']),  # UUID as primary identifier
                 idx=created_doc.get('idx'),  # User-defined identifier
                 custom_id=created_doc.get('custom_id'),  # User-defined custom ID
                 filename=created_doc.get('filename', ''),
@@ -399,7 +399,7 @@ async def get_document_endpoint(document_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Document not found")
 
         return DocumentResponse(
-            serial_id=str(doc['serial_id']),  # UUID as primary identifier
+            uuid=str(doc['uuid']),  # UUID as primary identifier
             idx=doc.get('idx'),  # User-defined identifier
             custom_id=doc.get('custom_id'),  # User-defined custom ID
             filename=doc.get('filename', ''),
@@ -455,11 +455,11 @@ async def update_document_endpoint(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Update document using UUID (serial_id)
-        updated_doc = await update_document(doc['serial_id'], **update_data)
+        # Update document using UUID (uuid)
+        updated_doc = await update_document(doc['uuid'], **update_data)
         
         return DocumentResponse(
-            serial_id=str(updated_doc['serial_id']),  # UUID as primary identifier
+            uuid=str(updated_doc['uuid']),  # UUID as primary identifier
             idx=updated_doc.get('idx'),  # User-defined identifier
             custom_id=updated_doc.get('custom_id'),  # User-defined custom ID
             filename=updated_doc.get('filename', ''),
@@ -500,8 +500,8 @@ async def delete_document_endpoint(document_id: str, request: Request):
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Delete document using UUID (serial_id)
-        success = await delete_document(doc['serial_id'])
+        # Delete document using UUID (uuid)
+        success = await delete_document(doc['uuid'])
         
         if not success:
             raise HTTPException(status_code=500, detail="Failed to delete document")
@@ -536,8 +536,8 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
                     failed_ids.append(doc_id)
                     continue
                 
-                # Delete using UUID (serial_id)
-                success = await delete_document(doc['serial_id'])
+                # Delete using UUID (uuid)
+                success = await delete_document(doc['uuid'])
                 if success:
                     deleted_count += 1
                 else:
