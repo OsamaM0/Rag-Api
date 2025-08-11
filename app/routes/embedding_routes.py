@@ -14,11 +14,11 @@ from app.services.database import (
     get_document_by_idx,
     get_document_by_uuid,
     create_embedding,
-    get_embedding_by_id,
-    delete_embedding,
+    get_embedding_by_id as db_get_embedding_by_id,
+    delete_embedding as db_delete_embedding,
     similarity_search_embeddings,
     get_embeddings_by_document,
-    get_all_embeddings,
+    get_all_embeddings as db_get_all_embeddings,
     get_collection_by_uuid,
     get_collection_by_idx
 )
@@ -291,7 +291,7 @@ async def list_embeddings(
             embeddings = embeddings[offset:offset + page_size]
         else:
             # Get all embeddings with pagination
-            embeddings, total = await get_all_embeddings(limit=page_size, offset=offset)
+            embeddings, total = await db_get_all_embeddings(limit=page_size, offset=offset)
         
         # Convert to response format
         response_items = []
@@ -326,7 +326,7 @@ async def list_embeddings(
 async def get_embedding(embedding_id: str, request: Request):
     """Get a specific embedding by ID."""
     try:
-        embedding = await get_embedding_by_id(embedding_id)
+        embedding = await db_get_embedding_by_id(embedding_id)
         
         if not embedding:
             raise HTTPException(status_code=404, detail="Embedding not found")
@@ -352,7 +352,7 @@ async def get_embedding(embedding_id: str, request: Request):
 async def delete_embedding(embedding_id: str, request: Request):
     """Delete a specific embedding."""
     try:
-        success = await delete_embedding(embedding_id)
+        success = await db_delete_embedding(embedding_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Embedding not found")
@@ -467,12 +467,12 @@ async def get_document_embeddings(
     """Get all embeddings for a specific document."""
     try:
         offset = (page - 1) * page_size
-        
+
         # Get document to verify it exists and get its UUID
         document = await get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
-        
+
         embeddings = await get_embeddings_by_document(str(document['uuid']))
         total = len(embeddings)
         # Apply pagination manually
@@ -526,7 +526,7 @@ async def delete_document_embeddings(document_id: str, request: Request):
         # Delete all embeddings for the document
         deleted_count = 0
         for embedding in embeddings:
-            success = await delete_embedding(embedding.get('custom_id'))
+            success = await db_delete_embedding(embedding.get('custom_id'))
             if success:
                 deleted_count += 1
         
@@ -550,7 +550,7 @@ async def get_embedding_stats(request: Request):
         total_embeddings = 0
         try:
             # Get actual count from database
-            embeddings_result = await get_all_embeddings(limit=1, offset=0)
+            embeddings_result = await db_get_all_embeddings(limit=1, offset=0)
             if embeddings_result and "total" in embeddings_result:
                 total_embeddings = embeddings_result["total"]
         except Exception as e:
@@ -580,8 +580,8 @@ async def recompute_embedding(embedding_id: str, request: Request):
     """Recompute embedding for a specific document."""
     try:
         # Get embedding record from database
-        embedding_record = await get_embedding_by_id(embedding_id)
-        
+        embedding_record = await db_get_embedding_by_id(embedding_id)
+
         if not embedding_record:
             raise HTTPException(status_code=404, detail="Embedding not found")
 

@@ -17,7 +17,7 @@ async def security_middleware(request: Request, call_next):
 
     jwt_secret = os.getenv("JWT_SECRET")
     if not jwt_secret:
-        logger.warn("JWT_SECRET not found in environment variables")
+        logger.warning("JWT_SECRET not found in environment variables")
         return await next_middleware_call()
 
     authorization = request.headers.get("Authorization")

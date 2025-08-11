@@ -229,7 +229,7 @@ async def drop_index(index_name: str, request: Request):
 
 @router.get("/vector/similarity-search")
 async def vector_similarity_search(
-    vector: List[float],
+    vector: List[float] = Query(..., description="Query vector values (repeat 'vector' param)"),
     table_name: str = Query("langchain_pg_embedding", description="Table name"),
     limit: int = Query(10, ge=1, le=100, description="Number of results"),
     threshold: Optional[float] = Query(None, description="Similarity threshold"),

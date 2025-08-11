@@ -1,6 +1,7 @@
 # app/models.py
 from enum import Enum
 from pydantic import BaseModel, Field
+from pydantic import ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -54,10 +55,7 @@ class DocumentUpdate(BaseModel):
     custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     metadata: Optional[dict] = Field(None, description="Document metadata")
 
-    class Config:
-        # Allow partial updates by including None values in serialization
-        # but exclude unset fields to support true partial updates
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class DocumentUploadRequest(BaseModel):
@@ -93,9 +91,7 @@ class CollectionUpdate(BaseModel):
     custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Collection metadata")
 
-    class Config:
-        # Allow partial updates by excluding unset fields
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CollectionResponse(BaseModel):
@@ -225,5 +221,4 @@ class PaginatedResponse(BaseModel):
     has_next: bool
     has_prev: bool
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
