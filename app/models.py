@@ -303,6 +303,45 @@ class DocumentBlocksBulkCreate(BaseModel):
     blocks: List[DocumentBlockCreate] = Field(..., description="List of blocks to create")
 
 
+# Document Images Models
+class DocumentImageCreate(BaseModel):
+    page_no: int = Field(..., description="Page number")
+    mimetype: str = Field(..., description="Image MIME type")
+    dpi: Optional[int] = Field(None, description="Image DPI")
+    width: Optional[float] = Field(None, description="Image width")
+    height: Optional[float] = Field(None, description="Image height")
+    page_width: Optional[float] = Field(None, description="Page width")
+    page_height: Optional[float] = Field(None, description="Page height")
+    uri: str = Field(..., description="Base64 encoded image data URI")
+
+
+class DocumentImageResponse(BaseModel):
+    id: str = Field(..., description="Image UUID")
+    document_id: str = Field(..., description="Document UUID")
+    page_no: int = Field(..., description="Page number")
+    mimetype: str = Field(..., description="Image MIME type")
+    dpi: Optional[int] = Field(None, description="Image DPI")
+    width: Optional[float] = Field(None, description="Image width")
+    height: Optional[float] = Field(None, description="Image height")
+    page_width: Optional[float] = Field(None, description="Page width")
+    page_height: Optional[float] = Field(None, description="Page height")
+    uri: str = Field(..., description="Base64 encoded image data URI")
+    created_at: Optional[datetime] = None
+
+
+class DocumentImageUpdate(BaseModel):
+    """Model for partial document image updates."""
+    mimetype: Optional[str] = Field(None, description="Image MIME type")
+    dpi: Optional[int] = Field(None, description="Image DPI")
+    width: Optional[float] = Field(None, description="Image width")
+    height: Optional[float] = Field(None, description="Image height")
+    page_width: Optional[float] = Field(None, description="Page width")
+    page_height: Optional[float] = Field(None, description="Page height")
+    uri: Optional[str] = Field(None, description="Base64 encoded image data URI")
+
+    model_config = ConfigDict(extra="forbid")
+
+
 # Pagination Models
 class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number")

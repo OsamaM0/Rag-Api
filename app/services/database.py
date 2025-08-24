@@ -1099,6 +1099,43 @@ async def ensure_document_blocks_schema():
         logger.info("Document blocks schema ensured")
 
 
+async def ensure_document_images_schema():
+    """Ensure the document images table schema exists."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS document_images (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                document_id UUID REFERENCES documents(uuid) ON DELETE CASCADE,
+                page_no INTEGER NOT NULL,
+                mimetype TEXT NOT NULL,
+                dpi INTEGER,
+                width FLOAT,
+                height FLOAT,
+                page_width FLOAT,
+                page_height FLOAT,
+                uri TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(document_id, page_no)
+            );
+        """)
+        
+        # Create indexes
+        indexes_to_create = [
+            "CREATE INDEX IF NOT EXISTS idx_document_images_document_id ON document_images(document_id);",
+            "CREATE INDEX IF NOT EXISTS idx_document_images_page_no ON document_images(page_no);",
+            "CREATE INDEX IF NOT EXISTS idx_document_images_mimetype ON document_images(mimetype);",
+        ]
+        
+        for index_sql in indexes_to_create:
+            try:
+                await conn.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Could not create index: {e}")
+        
+        logger.info("Document images schema ensured")
+
+
 async def create_document_block(
     document_id: str,
     block_idx: int,
@@ -1217,6 +1254,182 @@ async def create_document_blocks_bulk(document_id: str, blocks: list) -> list:
             
         except Exception as e:
             logger.error(f"Error creating document blocks bulk: {str(e)}")
+            raise
+
+
+# Document Images functionality
+async def create_document_image(
+    document_id: str,
+    page_no: int,
+    mimetype: str,
+    uri: str,
+    dpi: int = None,
+    width: float = None,
+    height: float = None,
+    page_width: float = None,
+    page_height: float = None
+) -> dict:
+    """Create a new document image."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # First ensure the document exists
+            doc_exists = await conn.fetchval(
+                "SELECT uuid FROM documents WHERE uuid = $1", 
+                uuid.UUID(document_id)
+            )
+            if not doc_exists:
+                raise ValueError(f"Document with ID {document_id} not found")
+            
+            result = await conn.fetchrow("""
+                INSERT INTO document_images 
+                (document_id, page_no, mimetype, uri, dpi, width, height, page_width, page_height)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING *
+            """, 
+            uuid.UUID(document_id), page_no, mimetype, uri, dpi, width, height, page_width, page_height)
+            
+            if result:
+                return dict(result)
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error creating document image: {str(e)}")
+            raise
+
+
+async def create_document_images_bulk(document_id: str, images: list) -> list:
+    """Create multiple document images in a single transaction."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # First ensure the document exists
+            doc_exists = await conn.fetchval(
+                "SELECT uuid FROM documents WHERE uuid = $1", 
+                uuid.UUID(document_id)
+            )
+            if not doc_exists:
+                raise ValueError(f"Document with ID {document_id} not found")
+            
+            # Prepare bulk insert data
+            bulk_data = []
+            for image in images:
+                bulk_data.append((
+                    uuid.UUID(document_id),
+                    image.get("page_no"),
+                    image.get("mimetype"),
+                    image.get("uri"),
+                    image.get("dpi"),
+                    image.get("width"),
+                    image.get("height"),
+                    image.get("page_width"),
+                    image.get("page_height")
+                ))
+            
+            # Use executemany for bulk insert
+            await conn.executemany("""
+                INSERT INTO document_images 
+                (document_id, page_no, mimetype, uri, dpi, width, height, page_width, page_height)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (document_id, page_no) DO UPDATE SET
+                mimetype = EXCLUDED.mimetype,
+                uri = EXCLUDED.uri,
+                dpi = EXCLUDED.dpi,
+                width = EXCLUDED.width,
+                height = EXCLUDED.height,
+                page_width = EXCLUDED.page_width,
+                page_height = EXCLUDED.page_height
+            """, bulk_data)
+            
+            # Return the created images
+            created_images = await conn.fetch("""
+                SELECT * FROM document_images 
+                WHERE document_id = $1
+                ORDER BY page_no
+            """, uuid.UUID(document_id))
+            
+            return [dict(image) for image in created_images]
+            
+        except Exception as e:
+            logger.error(f"Error creating document images bulk: {str(e)}")
+            raise
+
+
+async def get_document_images_by_document(
+    document_id: str, 
+    limit: int = 100, 
+    offset: int = 0
+) -> tuple:
+    """Get all images for a document with pagination."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Get total count
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM document_images WHERE document_id = $1",
+                uuid.UUID(document_id)
+            )
+            
+            # Get images with pagination
+            images = await conn.fetch("""
+                SELECT * FROM document_images 
+                WHERE document_id = $1
+                ORDER BY page_no
+                LIMIT $2 OFFSET $3
+            """, uuid.UUID(document_id), limit, offset)
+            
+            return [dict(image) for image in images], total
+            
+        except Exception as e:
+            logger.error(f"Error getting document images: {str(e)}")
+            raise
+
+
+async def get_document_image_by_id(image_id: str) -> dict:
+    """Get a specific document image by ID."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchrow(
+                "SELECT * FROM document_images WHERE id = $1",
+                uuid.UUID(image_id)
+            )
+            if result:
+                return dict(result)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting document image: {str(e)}")
+            raise
+
+
+async def delete_document_image(image_id: str) -> bool:
+    """Delete a specific document image."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                "DELETE FROM document_images WHERE id = $1",
+                uuid.UUID(image_id)
+            )
+            return result == "DELETE 1"
+        except Exception as e:
+            logger.error(f"Error deleting document image: {str(e)}")
+            raise
+
+
+async def delete_document_images_by_document(document_id: str) -> int:
+    """Delete all images for a specific document."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                "DELETE FROM document_images WHERE document_id = $1",
+                uuid.UUID(document_id)
+            )
+            # Extract the count from result string "DELETE N"
+            return int(result.split()[-1]) if result.split() else 0
+        except Exception as e:
+            logger.error(f"Error deleting document images: {str(e)}")
             raise
 
 

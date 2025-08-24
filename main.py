@@ -25,6 +25,7 @@ from app.middleware import security_middleware
 from app.routes import (
     document_routes, 
     document_block_routes,
+    document_image_routes,
     pgvector_routes, 
     collection_routes,
     query_routes,
@@ -32,7 +33,7 @@ from app.routes import (
     database_routes,
     health_routes
 )
-from app.services.database import PSQLDatabase, ensure_vector_indexes, ensure_document_blocks_schema
+from app.services.database import PSQLDatabase, ensure_vector_indexes, ensure_document_blocks_schema, ensure_document_images_schema
 
 
 @asynccontextmanager
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
         await PSQLDatabase.get_pool()  # Initialize the pool
         await ensure_vector_indexes()
         await ensure_document_blocks_schema()  # Initialize document blocks schema
+        await ensure_document_images_schema()  # Initialize document images schema
 
     yield
 
@@ -107,6 +109,10 @@ app.include_router(document_routes.router)
 
 # Document Blocks - Document block management and JSON parsing
 app.include_router(document_block_routes.router)
+
+# Document Images - Document image management (read-only for viewing uploaded images)
+if debug_mode:
+    app.include_router(document_image_routes.router)
 
 # Embeddings - Vector embedding operations
 app.include_router(embedding_routes.router)

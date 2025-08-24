@@ -26,6 +26,8 @@ from app.services.database import (
     delete_document_blocks_by_document,
     search_document_blocks,
     ensure_document_blocks_schema,
+    ensure_document_images_schema,
+    create_document_images_bulk,
     get_document_by_uuid
 )
 
@@ -253,11 +255,15 @@ async def upload_json_and_create_blocks(
         
         # Process JSON data
         blocks_data = []
+        images_data = []
         
         # Check if this is a Docling format JSON
         if isinstance(json_data, dict) and "schema_name" in json_data and json_data["schema_name"] == "DoclingDocument":
             # Process Docling format
             blocks_data = _process_docling_json(json_data, custom_id)
+            
+            # Process pages data for images
+            images_data = _process_pages_data(json_data)
         else:
             # Handle other JSON structures (legacy support)
             if isinstance(json_data, list):
@@ -278,6 +284,10 @@ async def upload_json_and_create_blocks(
                     processed_block = _process_block_data(json_data, 0, custom_id)
                     if processed_block:
                         blocks_data.append(processed_block)
+                
+                # Check for pages data even in legacy format
+                if 'pages' in json_data:
+                    images_data = _process_pages_data(json_data)
         
         if not blocks_data:
             raise HTTPException(status_code=400, detail="No valid block data found in JSON file")
@@ -291,10 +301,22 @@ async def upload_json_and_create_blocks(
         # Create blocks in bulk
         created_blocks = await create_document_blocks_bulk(document_id, blocks_data)
         
+        # Create images in bulk if any images were found
+        created_images = []
+        if images_data:
+            try:
+                created_images = await create_document_images_bulk(document_id, images_data)
+                logger.info(f"Created {len(created_images)} document images for document {document_id}")
+            except Exception as e:
+                logger.warning(f"Failed to create document images: {str(e)}")
+                # Continue even if image creation fails
+        
         return JSONResponse({
             "success": True,
-            "message": f"Successfully processed JSON file and created {len(created_blocks)} blocks",
+            "message": f"Successfully processed JSON file and created {len(created_blocks)} blocks" + 
+                      (f" and {len(created_images)} images" if created_images else ""),
             "blocks_created": len(created_blocks),
+            "images_created": len(created_images),
             "document_id": document_id,
             "format_detected": "DoclingDocument" if "schema_name" in json_data else "Legacy"
         })
@@ -534,6 +556,45 @@ def _process_docling_json(json_data: dict, custom_id: str = None) -> list:
     all_elements.sort(key=lambda x: x.get('block_idx', 0))
     
     return all_elements
+
+
+def _process_pages_data(json_data: dict) -> list:
+    """Process pages data from JSON and extract image information."""
+    images_data = []
+    pages = json_data.get("pages", {})
+    
+    for page_key, page_data in pages.items():
+        try:
+            # Extract page number (could be string or int)
+            page_no = int(page_key) if isinstance(page_key, str) and page_key.isdigit() else page_data.get("page_no", 1)
+            
+            # Extract image data
+            image_data = page_data.get("image", {})
+            if image_data and image_data.get("uri"):
+                # Extract page size
+                page_size = page_data.get("size", {})
+                
+                # Extract image size
+                image_size = image_data.get("size", {})
+                
+                image_info = {
+                    "page_no": page_no,
+                    "mimetype": image_data.get("mimetype", "image/png"),
+                    "uri": image_data.get("uri"),
+                    "dpi": image_data.get("dpi"),
+                    "width": image_size.get("width"),
+                    "height": image_size.get("height"),
+                    "page_width": page_size.get("width"),
+                    "page_height": page_size.get("height")
+                }
+                
+                images_data.append(image_info)
+                
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to process page data for page {page_key}: {str(e)}")
+            continue
+    
+    return images_data
 
 def _process_block_data(block_data: dict, default_idx: int, custom_id: str = None) -> dict:
     """Process individual block data from JSON (legacy format support)."""

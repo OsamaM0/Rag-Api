@@ -6,6 +6,7 @@ This package contains all the API route definitions organized by functional grou
 - Collections: Document collection management
 - Documents: Document upload, processing, and CRUD operations  
 - Document Blocks: Document block management and JSON parsing
+- Document Images: Document image management (automatically populated from JSON pages data)
 - Embeddings: Vector embedding operations (supports both PG Vector and Atlas Mongo)
 - Queries: Search and retrieval operations (supports both PG Vector and Atlas Mongo)
 - Database: Database management and maintenance
@@ -17,6 +18,7 @@ from . import (
     collection_routes,
     document_routes,
     document_block_routes,
+    document_image_routes,
     embedding_routes,
     query_routes,
     database_routes,
@@ -28,6 +30,7 @@ __all__ = [
     "collection_routes",
     "document_routes",
     "document_block_routes",
+    "document_image_routes",
     "embedding_routes",
     "query_routes",
     "database_routes",
