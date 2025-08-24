@@ -13,7 +13,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import RAG_UPLOAD_DIR, logger, VECTOR_DB_TYPE, VectorDBType, vector_store
 from app.models import (
-    DocumentResponse, DocumentCreate, DocumentUpdate, PaginatedResponse, SuccessResponse
+    DocumentResponse, DocumentCreate, DocumentUpdate, PaginatedResponse, SuccessResponse,
+    HashSearchRequest, HashSearchResponse, DuplicateDocumentsResponse,
+    HashGenerationRequest, HashGenerationResponse
 )
 from app.services.database import (
     get_all_documents,
@@ -27,7 +29,15 @@ from app.services.database import (
     delete_document,
     create_embedding,
     get_collection_by_uuid,
-    get_collection_by_idx
+    get_collection_by_idx,
+    get_documents_by_binary_hash,
+    get_documents_by_source_binary_hash,
+    search_documents_by_hashes,
+    get_document_by_binary_hash_single,
+    get_document_by_source_binary_hash_single,
+    find_duplicate_documents_by_hash,
+    generate_blake2b_hash,
+    generate_blake2b_hash_from_bytes
 )
 from app.utils.document_loader import get_loader, cleanup_temp_encoding_file
 
@@ -161,6 +171,7 @@ async def list_documents(
                 page_content=doc.get('page_content'),
                 mimetype=doc.get('mimetype'),
                 binary_hash=doc.get('binary_hash'),
+                source_binary_hash=doc.get('source_binary_hash'),
                 description=doc.get('description'),
                 keywords=doc.get('keywords'),
                 page_number=doc.get('page_number'),
@@ -222,6 +233,7 @@ async def create_document_endpoint(
             content=document.content,
             page_content=document.page_content,
             mimetype=document.mimetype,
+            source_binary_hash=document.source_binary_hash,
             description=document.description,
             keywords=document.keywords,
             page_number=document.page_number,
@@ -241,6 +253,7 @@ async def create_document_endpoint(
             page_content=created_doc.get('page_content'),
             mimetype=created_doc.get('mimetype'),
             binary_hash=created_doc.get('binary_hash'),
+            source_binary_hash=created_doc.get('source_binary_hash'),
             description=created_doc.get('description'),
             keywords=created_doc.get('keywords'),
             page_number=created_doc.get('page_number'),
@@ -266,6 +279,7 @@ async def create_document_with_upload(
     collection_id: Optional[str] = Form(None),
     idx: Optional[str] = Form(None),
     custom_id: Optional[str] = Form(None),
+    source_binary_hash: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     keywords: Optional[str] = Form(None),
     create_embeddings: bool = Form(True)
@@ -292,7 +306,7 @@ async def create_document_with_upload(
         
         # Read file content
         file_content = await file.read()
-        file_hash = hashlib.md5(file_content).hexdigest()
+        file_hash = hashlib.blake2b(file_content).hexdigest()
         
         # Save file temporarily for processing
         temp_file_path = os.path.join(RAG_UPLOAD_DIR, f"{document_id}_{file.filename}")
@@ -329,6 +343,7 @@ async def create_document_with_upload(
                 content=full_content,
                 page_content=page_content,
                 mimetype=file.content_type,
+                source_binary_hash=source_binary_hash,
                 description=description,
                 save_pdf_path=(file_ext == "pdf"),
                 keywords=keywords,
@@ -357,6 +372,7 @@ async def create_document_with_upload(
                 page_content=created_doc.get('page_content'),
                 mimetype=created_doc.get('mimetype'),
                 binary_hash=created_doc.get('binary_hash'),
+                source_binary_hash=created_doc.get('source_binary_hash'),
                 description=created_doc.get('description'),
                 keywords=created_doc.get('keywords'),
                 page_number=created_doc.get('page_number'),
@@ -407,6 +423,7 @@ async def get_document_endpoint(document_id: str, request: Request):
             page_content=doc.get('page_content'),
             mimetype=doc.get('mimetype'),
             binary_hash=doc.get('binary_hash'),
+            source_binary_hash=doc.get('source_binary_hash'),
             description=doc.get('description'),
             keywords=doc.get('keywords'),
             page_number=doc.get('page_number'),
@@ -467,6 +484,7 @@ async def update_document_endpoint(
             page_content=updated_doc.get('page_content'),
             mimetype=updated_doc.get('mimetype'),
             binary_hash=updated_doc.get('binary_hash'),
+            source_binary_hash=updated_doc.get('source_binary_hash'),
             description=updated_doc.get('description'),
             keywords=updated_doc.get('keywords'),
             page_number=updated_doc.get('page_number'),
@@ -563,3 +581,219 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
     except Exception as e:
         logger.error(f"Failed to delete documents | IDs: {document_ids} | Error: {str(e)} | Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to delete documents: {str(e)}")
+
+
+# Hash-based Search Endpoints
+@router.post("/search/hash", response_model=HashSearchResponse)
+async def search_documents_by_hash(
+    request: Request,
+    search_request: HashSearchRequest
+):
+    """Search documents by binary_hash or source_binary_hash with fast indexing."""
+    try:
+        if not search_request.binary_hash and not search_request.source_binary_hash:
+            raise HTTPException(
+                status_code=400, 
+                detail="At least one hash parameter (binary_hash or source_binary_hash) is required"
+            )
+        
+        offset = (search_request.page - 1) * search_request.page_size
+        
+        # Validate collection if provided
+        collection_uuid = None
+        if search_request.collection_id:
+            collection = await get_collection_by_uuid(search_request.collection_id)
+            if not collection:
+                collection = await get_collection_by_idx(search_request.collection_id)
+            if not collection:
+                from app.services.database import get_collection_by_custom_id
+                collection = await get_collection_by_custom_id(search_request.collection_id)
+                
+            if not collection:
+                raise HTTPException(status_code=404, detail=f"Collection {search_request.collection_id} not found")
+            collection_uuid = collection['uuid']
+        
+        # Perform search
+        documents, total = await search_documents_by_hashes(
+            binary_hash=search_request.binary_hash,
+            source_binary_hash=search_request.source_binary_hash,
+            collection_uuid=collection_uuid,
+            limit=search_request.page_size,
+            offset=offset
+        )
+        
+        # Convert to response format
+        response_documents = []
+        for doc in documents:
+            response_documents.append(DocumentResponse(
+                uuid=str(doc['uuid']),
+                idx=doc.get('idx'),
+                custom_id=doc.get('custom_id'),
+                filename=doc.get('filename', ''),
+                content=doc.get('content'),
+                page_content=doc.get('page_content'),
+                mimetype=doc.get('mimetype'),
+                binary_hash=doc.get('binary_hash'),
+                source_binary_hash=doc.get('source_binary_hash'),
+                description=doc.get('description'),
+                keywords=doc.get('keywords'),
+                page_number=doc.get('page_number'),
+                pdf_path=doc.get('pdf_path'),
+                collection_id=str(doc.get('collection_id')) if doc.get('collection_id') else None,
+                collection_name=doc.get('collection_name'),
+                metadata=parse_metadata(doc.get('metadata')),
+                created_at=doc.get('created_at'),
+                updated_at=doc.get('updated_at')
+            ))
+        
+        total_pages = (total + search_request.page_size - 1) // search_request.page_size
+        
+        return HashSearchResponse(
+            documents=response_documents,
+            total=total,
+            page=search_request.page,
+            page_size=search_request.page_size,
+            total_pages=total_pages,
+            search_params=search_request
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to search documents by hash | Error: {str(e)} | Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to search documents by hash: {str(e)}")
+
+
+@router.get("/search/binary-hash/{binary_hash}", response_model=DocumentResponse)
+async def get_document_by_binary_hash(binary_hash: str, request: Request):
+    """Get a single document by binary_hash (fast lookup)."""
+    try:
+        doc = await get_document_by_binary_hash_single(binary_hash)
+        
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found with the specified binary_hash")
+        
+        return DocumentResponse(
+            uuid=str(doc['uuid']),
+            idx=doc.get('idx'),
+            custom_id=doc.get('custom_id'),
+            filename=doc.get('filename', ''),
+            content=doc.get('content'),
+            page_content=doc.get('page_content'),
+            mimetype=doc.get('mimetype'),
+            binary_hash=doc.get('binary_hash'),
+            source_binary_hash=doc.get('source_binary_hash'),
+            description=doc.get('description'),
+            keywords=doc.get('keywords'),
+            page_number=doc.get('page_number'),
+            pdf_path=doc.get('pdf_path'),
+            collection_id=str(doc.get('collection_id')) if doc.get('collection_id') else None,
+            collection_name=doc.get('collection_name'),
+            metadata=parse_metadata(doc.get('metadata')),
+            created_at=doc.get('created_at'),
+            updated_at=doc.get('updated_at')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document by binary_hash | Hash: {binary_hash} | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document by binary_hash: {str(e)}")
+
+
+@router.get("/search/source-binary-hash/{source_binary_hash}", response_model=DocumentResponse)
+async def get_document_by_source_binary_hash(source_binary_hash: str, request: Request):
+    """Get a single document by source_binary_hash (fast lookup)."""
+    try:
+        doc = await get_document_by_source_binary_hash_single(source_binary_hash)
+        
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found with the specified source_binary_hash")
+        
+        return DocumentResponse(
+            uuid=str(doc['uuid']),
+            idx=doc.get('idx'),
+            custom_id=doc.get('custom_id'),
+            filename=doc.get('filename', ''),
+            content=doc.get('content'),
+            page_content=doc.get('page_content'),
+            mimetype=doc.get('mimetype'),
+            binary_hash=doc.get('binary_hash'),
+            source_binary_hash=doc.get('source_binary_hash'),
+            description=doc.get('description'),
+            keywords=doc.get('keywords'),
+            page_number=doc.get('page_number'),
+            pdf_path=doc.get('pdf_path'),
+            collection_id=str(doc.get('collection_id')) if doc.get('collection_id') else None,
+            collection_name=doc.get('collection_name'),
+            metadata=parse_metadata(doc.get('metadata')),
+            created_at=doc.get('created_at'),
+            updated_at=doc.get('updated_at')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document by source_binary_hash | Hash: {source_binary_hash} | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document by source_binary_hash: {str(e)}")
+
+
+@router.get("/duplicates/{hash_type}", response_model=List[DuplicateDocumentsResponse])
+async def find_duplicate_documents(
+    hash_type: str,
+    request: Request
+):
+    """Find documents with duplicate hashes for deduplication."""
+    try:
+        if hash_type not in ["binary_hash", "source_binary_hash"]:
+            raise HTTPException(
+                status_code=400,
+                detail="hash_type must be 'binary_hash' or 'source_binary_hash'"
+            )
+        
+        duplicates = await find_duplicate_documents_by_hash(hash_type)
+        
+        response = []
+        for duplicate in duplicates:
+            response.append(DuplicateDocumentsResponse(
+                hash_value=duplicate[hash_type],
+                count=duplicate['count'],
+                document_ids=[str(uuid) for uuid in duplicate['document_ids']],
+                hash_type=hash_type
+            ))
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to find duplicate documents | Hash type: {hash_type} | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to find duplicate documents: {str(e)}")
+
+
+@router.post("/generate-hash", response_model=HashGenerationResponse)
+async def generate_hash_for_content(
+    request: Request,
+    hash_request: HashGenerationRequest
+):
+    """Generate blake2b hash for given content."""
+    try:
+        if not hash_request.content:
+            raise HTTPException(status_code=400, detail="Content cannot be empty")
+        
+        if hash_request.hash_type != "blake2b":
+            raise HTTPException(status_code=400, detail="Only blake2b hash type is currently supported")
+        
+        hash_value = generate_blake2b_hash(hash_request.content)
+        
+        return HashGenerationResponse(
+            hash_value=hash_value,
+            hash_type=hash_request.hash_type,
+            content_length=len(hash_request.content)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate hash | Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate hash: {str(e)}")

@@ -16,6 +16,7 @@ class DocumentResponse(BaseModel):
     page_content: Optional[str] = None  # For vector chunks
     mimetype: Optional[str] = None
     binary_hash: Optional[str] = None
+    source_binary_hash: Optional[str] = None  # Hash for source content identification
     description: Optional[str] = None
     keywords: Optional[str] = None
     page_number: Optional[int] = None
@@ -32,6 +33,7 @@ class DocumentCreate(BaseModel):
     content: Optional[str] = Field(None, description="Full text content of the document")
     page_content: Optional[str] = Field(None, description="Chunk content for vector search")
     mimetype: str = Field(..., description="MIME type of the document")
+    source_binary_hash: Optional[str] = Field(None, description="Blake2b hash for source content identification")
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
     page_number: Optional[int] = Field(None, description="Page number if applicable")
@@ -50,6 +52,7 @@ class DocumentUpdate(BaseModel):
     filename: Optional[str] = Field(None, description="Original filename")
     content: Optional[str] = Field(None, description="Full text content of the document")
     page_content: Optional[str] = Field(None, description="Chunk content for vector search")
+    source_binary_hash: Optional[str] = Field(None, description="Blake2b hash for source content identification")
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
     custom_id: Optional[str] = Field(None, description="User-defined custom ID")
@@ -129,6 +132,43 @@ class SimilaritySearchRequest(BaseModel):
 class SimilaritySearchResponse(BaseModel):
     document: DocumentResponse
     score: float
+
+
+# Hash-based Search Models
+class HashSearchRequest(BaseModel):
+    binary_hash: Optional[str] = Field(None, description="Binary hash to search for")
+    source_binary_hash: Optional[str] = Field(None, description="Source binary hash to search for")
+    collection_id: Optional[str] = Field(None, description="Collection ID to filter by")
+    page: int = Field(default=1, ge=1, description="Page number")
+    page_size: int = Field(default=10, ge=1, le=100, description="Items per page")
+
+
+class HashSearchResponse(BaseModel):
+    documents: List[DocumentResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    search_params: HashSearchRequest
+
+
+class DuplicateDocumentsResponse(BaseModel):
+    hash_value: str
+    count: int
+    document_ids: List[str]
+    hash_type: str = Field(description="Type of hash: binary_hash or source_binary_hash")
+
+
+# Hash Generation Models
+class HashGenerationRequest(BaseModel):
+    content: str = Field(..., description="Content to generate hash for")
+    hash_type: str = Field(default="blake2b", description="Hash type (currently only blake2b)")
+
+
+class HashGenerationResponse(BaseModel):
+    hash_value: str
+    hash_type: str
+    content_length: int
 
 class EmbeddingResponse(BaseModel):
     id: str

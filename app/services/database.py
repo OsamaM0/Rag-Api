@@ -69,6 +69,7 @@ async def ensure_three_table_schema():
                 page_content TEXT,  -- For vector search chunks
                 mimetype VARCHAR,
                 binary_hash VARCHAR,
+                source_binary_hash VARCHAR,  -- Hash for source content identification
                 description TEXT,
                 keywords TEXT,
                 page_number INTEGER,
@@ -114,7 +115,8 @@ async def ensure_three_table_schema():
         # Add missing columns to documents table if they don't exist
         await conn.execute("""
             ALTER TABLE documents 
-            ADD COLUMN IF NOT EXISTS custom_id VARCHAR UNIQUE;
+            ADD COLUMN IF NOT EXISTS custom_id VARCHAR UNIQUE,
+            ADD COLUMN IF NOT EXISTS source_binary_hash VARCHAR;
         """)
         
         # Add foreign key constraints if they don't exist (after all tables are created)
@@ -164,6 +166,7 @@ async def ensure_three_table_schema():
             ("idx_documents_filename", "documents", "filename"),
             ("idx_documents_mimetype", "documents", "mimetype"),
             ("idx_documents_binary_hash", "documents", "binary_hash"),
+            ("idx_documents_source_binary_hash", "documents", "source_binary_hash"),
             ("idx_documents_file_id", "documents", "file_id"),
             ("idx_documents_user_id", "documents", "user_id"),
             
@@ -378,7 +381,7 @@ async def create_document(
     collection_uuid: str, filename: str = None, idx: str = None, custom_id: str = None,
     content: str = None, page_content: str = None, mimetype: str = None,
     description: str = None, save_pdf_path: bool = False, 
-    auto_embed: bool = True, **kwargs
+    auto_embed: bool = True, source_binary_hash: str = None, **kwargs
 ):
     """Create a new document using UUID foreign key to collection."""
     pool = await PSQLDatabase.get_pool()
@@ -386,7 +389,11 @@ async def create_document(
         # Auto-detect binary_hash if content provided
         binary_hash = None
         if content:
-            binary_hash = hashlib.md5(content.encode()).hexdigest()
+            binary_hash = hashlib.blake2b(content.encode()).hexdigest()
+        
+        # If source_binary_hash not provided but content is available, generate it from content
+        if source_binary_hash is None and content:
+            source_binary_hash = hashlib.blake2b(content.encode()).hexdigest()
             
         page_number = kwargs.get('page_number')
         pdf_path = kwargs.get('pdf_path') if save_pdf_path else None
@@ -398,15 +405,15 @@ async def create_document(
         result = await conn.fetchrow("""
             INSERT INTO documents (
                 idx, custom_id, collection_id, filename, content, page_content, mimetype, 
-                binary_hash, description, page_number, pdf_path, keywords,
+                binary_hash, source_binary_hash, description, page_number, pdf_path, keywords,
                 metadata, file_id, user_id, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content, 
-                     mimetype, binary_hash, description, page_number, pdf_path, 
+                     mimetype, binary_hash, source_binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """, idx, custom_id, collection_uuid, filename, content, page_content, mimetype, 
-             binary_hash, description, page_number, pdf_path, keywords,
+             binary_hash, source_binary_hash, description, page_number, pdf_path, keywords,
              metadata, file_id, user_id)
         return dict(result)
 
@@ -463,10 +470,14 @@ async def update_document(document_uuid: str, **kwargs):
         
         # Handle binary_hash update if content is provided
         if 'content' in kwargs and kwargs['content'] is not None:
-            kwargs['binary_hash'] = hashlib.md5(kwargs['content'].encode()).hexdigest()
+            kwargs['binary_hash'] = hashlib.blake2b(kwargs['content'].encode()).hexdigest()
+        
+        # Handle source_binary_hash - if not provided but content is, generate it
+        if 'source_binary_hash' not in kwargs and 'content' in kwargs and kwargs['content'] is not None:
+            kwargs['source_binary_hash'] = hashlib.blake2b(kwargs['content'].encode()).hexdigest()
         
         for field in ['idx', 'custom_id', 'filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
-                     'description', 'page_number', 'pdf_path', 'keywords', 'metadata']:
+                     'source_binary_hash', 'description', 'page_number', 'pdf_path', 'keywords', 'metadata']:
             if field in kwargs and kwargs[field] is not None:
                 param_count += 1
                 updates.append(f"{field} = ${param_count}")
@@ -484,7 +495,7 @@ async def update_document(document_uuid: str, **kwargs):
             SET {', '.join(updates)}
             WHERE uuid = ${param_count}
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content,
-                     mimetype, binary_hash, description, page_number, pdf_path, 
+                     mimetype, binary_hash, source_binary_hash, description, page_number, pdf_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)
@@ -600,6 +611,205 @@ async def get_all_documents(limit: int = 10, offset: int = 0, user_id: str = Non
         
         documents = [dict(row) for row in results]
         return documents, count_results
+
+
+# Fast Hash-based Search Functions
+async def get_documents_by_binary_hash(binary_hash: str, limit: int = 10, offset: int = 0):
+    """Fast search by binary_hash using index."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Get documents with binary_hash match
+            results = await conn.fetch("""
+                SELECT d.*, c.name as collection_name
+                FROM documents d
+                LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+                WHERE d.binary_hash = $1
+                ORDER BY d.created_at DESC
+                LIMIT $2 OFFSET $3
+            """, binary_hash, limit, offset)
+            
+            # Get total count
+            total = await conn.fetchval("""
+                SELECT COUNT(*) FROM documents WHERE binary_hash = $1
+            """, binary_hash)
+            
+            return [dict(row) for row in results], total
+            
+        except Exception as e:
+            logger.error(f"Error searching by binary_hash: {str(e)}")
+            raise
+
+
+async def get_documents_by_source_binary_hash(source_binary_hash: str, limit: int = 10, offset: int = 0):
+    """Fast search by source_binary_hash using index."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Get documents with source_binary_hash match
+            results = await conn.fetch("""
+                SELECT d.*, c.name as collection_name
+                FROM documents d
+                LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+                WHERE d.source_binary_hash = $1
+                ORDER BY d.created_at DESC
+                LIMIT $2 OFFSET $3
+            """, source_binary_hash, limit, offset)
+            
+            # Get total count
+            total = await conn.fetchval("""
+                SELECT COUNT(*) FROM documents WHERE source_binary_hash = $1
+            """, source_binary_hash)
+            
+            return [dict(row) for row in results], total
+            
+        except Exception as e:
+            logger.error(f"Error searching by source_binary_hash: {str(e)}")
+            raise
+
+
+async def search_documents_by_hashes(
+    binary_hash: str = None, 
+    source_binary_hash: str = None, 
+    collection_uuid: str = None,
+    limit: int = 10, 
+    offset: int = 0
+):
+    """Combined fast search by either binary_hash or source_binary_hash with optional collection filter."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            where_conditions = []
+            params = []
+            param_count = 0
+            
+            # Build where conditions
+            if binary_hash:
+                param_count += 1
+                where_conditions.append(f"d.binary_hash = ${param_count}")
+                params.append(binary_hash)
+                
+            if source_binary_hash:
+                param_count += 1
+                where_conditions.append(f"d.source_binary_hash = ${param_count}")
+                params.append(source_binary_hash)
+                
+            if collection_uuid:
+                param_count += 1
+                where_conditions.append(f"d.collection_id = ${param_count}")
+                params.append(collection_uuid)
+                
+            if not where_conditions:
+                raise ValueError("At least one hash parameter must be provided")
+                
+            where_clause = " AND ".join(where_conditions)
+            
+            # Get documents
+            param_count += 1
+            param_count_limit = param_count
+            param_count += 1
+            param_count_offset = param_count
+            params.extend([limit, offset])
+            
+            results = await conn.fetch(f"""
+                SELECT d.*, c.name as collection_name
+                FROM documents d
+                LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+                WHERE {where_clause}
+                ORDER BY d.created_at DESC
+                LIMIT ${param_count_limit} OFFSET ${param_count_offset}
+            """, *params)
+            
+            # Get total count
+            total = await conn.fetchval(f"""
+                SELECT COUNT(*) FROM documents d WHERE {where_clause}
+            """, *params[:-2])  # Exclude limit and offset
+            
+            return [dict(row) for row in results], total
+            
+        except Exception as e:
+            logger.error(f"Error searching by hashes: {str(e)}")
+            raise
+
+
+async def get_document_by_binary_hash_single(binary_hash: str):
+    """Get a single document by binary_hash (returns first match)."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchrow("""
+                SELECT d.*, c.name as collection_name
+                FROM documents d
+                LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+                WHERE d.binary_hash = $1
+                ORDER BY d.created_at DESC
+                LIMIT 1
+            """, binary_hash)
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Error getting document by binary_hash: {str(e)}")
+            return None
+
+
+async def get_document_by_source_binary_hash_single(source_binary_hash: str):
+    """Get a single document by source_binary_hash (returns first match)."""
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchrow("""
+                SELECT d.*, c.name as collection_name
+                FROM documents d
+                LEFT JOIN langchain_pg_collection c ON d.collection_id = c.uuid
+                WHERE d.source_binary_hash = $1
+                ORDER BY d.created_at DESC
+                LIMIT 1
+            """, source_binary_hash)
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Error getting document by source_binary_hash: {str(e)}")
+            return None
+
+
+# Hash generation utility functions
+def generate_blake2b_hash(content: str) -> str:
+    """Generate blake2b hash for content."""
+    if not content:
+        return None
+    return hashlib.blake2b(content.encode()).hexdigest()
+
+
+def generate_blake2b_hash_from_bytes(content: bytes) -> str:
+    """Generate blake2b hash from bytes content."""
+    if not content:
+        return None
+    return hashlib.blake2b(content).hexdigest()
+
+
+async def find_duplicate_documents_by_hash(hash_type: str = "binary_hash"):
+    """Find documents with duplicate hashes for deduplication."""
+    if hash_type not in ["binary_hash", "source_binary_hash"]:
+        raise ValueError("hash_type must be 'binary_hash' or 'source_binary_hash'")
+        
+    pool = await PSQLDatabase.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Find duplicate hashes
+            duplicates = await conn.fetch(f"""
+                SELECT {hash_type}, COUNT(*) as count, ARRAY_AGG(uuid ORDER BY created_at) as document_ids
+                FROM documents 
+                WHERE {hash_type} IS NOT NULL
+                GROUP BY {hash_type}
+                HAVING COUNT(*) > 1
+                ORDER BY count DESC
+            """)
+            
+            return [dict(row) for row in duplicates]
+            
+        except Exception as e:
+            logger.error(f"Error finding duplicate documents by {hash_type}: {str(e)}")
+            raise
 
 
 # Embedding Operations - Using Proper PK/FK Relationships
@@ -1244,4 +1454,14 @@ database = {
     # Other operations
     'get_all_collections': get_all_collections,
     'get_all_documents': get_all_documents,
+    
+    # Hash-based search methods
+    'get_documents_by_binary_hash': get_documents_by_binary_hash,
+    'get_documents_by_source_binary_hash': get_documents_by_source_binary_hash,
+    'search_documents_by_hashes': search_documents_by_hashes,
+    'get_document_by_binary_hash_single': get_document_by_binary_hash_single,
+    'get_document_by_source_binary_hash_single': get_document_by_source_binary_hash_single,
+    'find_duplicate_documents_by_hash': find_duplicate_documents_by_hash,
+    'generate_blake2b_hash': generate_blake2b_hash,
+    'generate_blake2b_hash_from_bytes': generate_blake2b_hash_from_bytes,
 }
