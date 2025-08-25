@@ -1,6 +1,7 @@
 # app/services/database.py
 import asyncpg
 import hashlib
+import json
 import uuid
 from app.config import DSN, logger
 
@@ -73,7 +74,7 @@ async def ensure_three_table_schema():
                 description TEXT,
                 keywords TEXT,
                 page_number INTEGER,
-                pdf_path TEXT,
+                document_path TEXT,
                 collection_id UUID REFERENCES langchain_pg_collection(uuid) ON DELETE CASCADE,
                 metadata JSONB DEFAULT '{}',
                 file_id VARCHAR,  -- Legacy compatibility
@@ -380,7 +381,7 @@ async def delete_collection_by_idx(idx: str):
 async def create_document(
     collection_uuid: str, filename: str = None, idx: str = None, custom_id: str = None,
     content: str = None, page_content: str = None, mimetype: str = None,
-    description: str = None, save_pdf_path: bool = False, 
+    description: str = None, document_path: str = None,
     auto_embed: bool = True, source_binary_hash: str = None, **kwargs
 ):
     """Create a new document using UUID foreign key to collection."""
@@ -396,25 +397,28 @@ async def create_document(
             source_binary_hash = hashlib.blake2b(content.encode()).hexdigest()
             
         page_number = kwargs.get('page_number')
-        pdf_path = kwargs.get('pdf_path') if save_pdf_path else None
+        document_path = document_path or kwargs.get('document_path')
         keywords = kwargs.get('keywords')
         metadata = kwargs.get('metadata', {})
         file_id = kwargs.get('file_id')  # Legacy compatibility
         user_id = kwargs.get('user_id')  # Legacy compatibility
         
+        # Convert metadata dict to JSON string for PostgreSQL JSONB
+        metadata_json = json.dumps(metadata or {})
+        
         result = await conn.fetchrow("""
             INSERT INTO documents (
                 idx, custom_id, collection_id, filename, content, page_content, mimetype, 
-                binary_hash, source_binary_hash, description, page_number, pdf_path, keywords,
+                binary_hash, source_binary_hash, description, page_number, document_path, keywords,
                 metadata, file_id, user_id, created_at, updated_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content, 
-                     mimetype, binary_hash, source_binary_hash, description, page_number, pdf_path, 
+                     mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """, idx, custom_id, collection_uuid, filename, content, page_content, mimetype, 
-             binary_hash, source_binary_hash, description, page_number, pdf_path, keywords,
-             metadata, file_id, user_id)
+             binary_hash, source_binary_hash, description, page_number, document_path, keywords,
+             metadata_json, file_id, user_id)
         return dict(result)
 
 
@@ -476,8 +480,12 @@ async def update_document(document_uuid: str, **kwargs):
         if 'source_binary_hash' not in kwargs and 'content' in kwargs and kwargs['content'] is not None:
             kwargs['source_binary_hash'] = hashlib.blake2b(kwargs['content'].encode()).hexdigest()
         
+        # Handle metadata conversion to JSON string for PostgreSQL JSONB
+        if 'metadata' in kwargs and kwargs['metadata'] is not None:
+            kwargs['metadata'] = json.dumps(kwargs['metadata'])
+        
         for field in ['idx', 'custom_id', 'filename', 'content', 'page_content', 'mimetype', 'binary_hash', 
-                     'source_binary_hash', 'description', 'page_number', 'pdf_path', 'keywords', 'metadata']:
+                     'source_binary_hash', 'description', 'page_number', 'document_path', 'keywords', 'metadata']:
             if field in kwargs and kwargs[field] is not None:
                 param_count += 1
                 updates.append(f"{field} = ${param_count}")
@@ -495,7 +503,7 @@ async def update_document(document_uuid: str, **kwargs):
             SET {', '.join(updates)}
             WHERE uuid = ${param_count}
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content,
-                     mimetype, binary_hash, source_binary_hash, description, page_number, pdf_path, 
+                     mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)

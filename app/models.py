@@ -1,9 +1,10 @@
 # app/models.py
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic import ConfigDict
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
+import json
 
 
 # Document Models - Using Proper PK/FK Relationships
@@ -20,7 +21,7 @@ class DocumentResponse(BaseModel):
     description: Optional[str] = None
     keywords: Optional[str] = None
     page_number: Optional[int] = None
-    pdf_path: Optional[str] = None
+    document_path: Optional[str] = None
     collection_id: Optional[str] = None  # UUID foreign key to collection
     collection_name: Optional[str] = None
     metadata: Optional[dict] = None
@@ -37,13 +38,28 @@ class DocumentCreate(BaseModel):
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
     page_number: Optional[int] = Field(None, description="Page number if applicable")
-    save_pdf_path: bool = Field(False, description="Whether to save PDF file to disk")
     collection_id: str = Field(..., description="Collection UUID this document belongs to")
-    metadata: Optional[dict] = Field(default_factory=dict)
+    metadata: Optional[Union[dict, str]] = Field(default_factory=dict, description="Document metadata as dict or JSON string")
     file_id: Optional[str] = Field(None, description="Legacy file ID for compatibility")
     user_id: Optional[str] = Field(None, description="User ID")
     idx: Optional[str] = Field(None, description="User-defined document identifier (optional)")
     custom_id: Optional[str] = Field(None, description="User-defined custom ID (optional)")
+    document_path: Optional[str] = Field(None, description="Path to the document file")
+
+    @field_validator('metadata')
+    @classmethod
+    def validate_metadata(cls, v):
+        """Convert string metadata to dict if needed."""
+        if v is None:
+            return {}
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                raise ValueError("metadata string must be valid JSON")
+        if isinstance(v, dict):
+            return v
+        raise ValueError("metadata must be a dict or valid JSON string")
 
 
 
@@ -56,7 +72,22 @@ class DocumentUpdate(BaseModel):
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
     custom_id: Optional[str] = Field(None, description="User-defined custom ID")
-    metadata: Optional[dict] = Field(None, description="Document metadata")
+    metadata: Optional[Union[dict, str]] = Field(None, description="Document metadata as dict or JSON string")
+
+    @field_validator('metadata')
+    @classmethod
+    def validate_metadata(cls, v):
+        """Convert string metadata to dict if needed."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                raise ValueError("metadata string must be valid JSON")
+        if isinstance(v, dict):
+            return v
+        raise ValueError("metadata must be a dict or valid JSON string")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -64,7 +95,6 @@ class DocumentUpdate(BaseModel):
 class DocumentUploadRequest(BaseModel):
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
-    save_pdf_path: bool = Field(False, description="Whether to save PDF file to disk")
     collection_id: str = Field(..., description="Collection UUID this document belongs to")
     auto_embed: bool = Field(True, description="Automatically create embeddings for document")
 
@@ -313,6 +343,7 @@ class DocumentImageCreate(BaseModel):
     page_width: Optional[float] = Field(None, description="Page width")
     page_height: Optional[float] = Field(None, description="Page height")
     uri: str = Field(..., description="Base64 encoded image data URI")
+    document_path: Optional[str] = Field(None, description="Path to the document file")
 
 
 class DocumentImageResponse(BaseModel):
