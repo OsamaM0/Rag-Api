@@ -71,6 +71,7 @@ class DocumentUpdate(BaseModel):
     source_binary_hash: Optional[str] = Field(None, description="Blake2b hash for source content identification")
     description: Optional[str] = Field(None, description="Document description")
     keywords: Optional[str] = Field(None, description="Document keywords")
+    idx: Optional[str] = Field(None, description="User-defined document identifier")
     custom_id: Optional[str] = Field(None, description="User-defined custom ID")
     metadata: Optional[Union[dict, str]] = Field(None, description="Document metadata as dict or JSON string")
 
