@@ -15,6 +15,7 @@ class DocumentResponse(BaseModel):
     filename: str
     content: Optional[str] = None
     page_content: Optional[str] = None  # For vector chunks
+    content_with_image: Optional[str] = None  # Combined content with inline image representation (read-only)
     mimetype: Optional[str] = None
     binary_hash: Optional[str] = None
     source_binary_hash: Optional[str] = None  # Hash for source content identification
