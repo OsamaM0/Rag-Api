@@ -68,7 +68,7 @@ async def ensure_three_table_schema():
                 filename VARCHAR NOT NULL,
                 content TEXT,
                 page_content TEXT,  -- For vector search chunks
-                content_with_image TEXT,  -- Full content including any inline image representations
+                content_without_image TEXT,  -- Full content including any inline image representations
                 mimetype VARCHAR,
                 binary_hash VARCHAR,
                 source_binary_hash VARCHAR,  -- Hash for source content identification
@@ -119,7 +119,7 @@ async def ensure_three_table_schema():
             ALTER TABLE documents 
             ADD COLUMN IF NOT EXISTS custom_id VARCHAR UNIQUE,
             ADD COLUMN IF NOT EXISTS source_binary_hash VARCHAR,
-            ADD COLUMN IF NOT EXISTS content_with_image TEXT;
+            ADD COLUMN IF NOT EXISTS content_without_image TEXT;
         """)
         
         # Add foreign key constraints if they don't exist (after all tables are created)
@@ -416,7 +416,7 @@ async def create_document(
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content, 
-                     content_with_image, mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
+                     content_without_image, mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """, idx, custom_id, collection_uuid, filename, content, page_content, mimetype, 
              binary_hash, source_binary_hash, description, page_number, document_path, keywords,
@@ -505,7 +505,7 @@ async def update_document(document_uuid: str, **kwargs):
             SET {', '.join(updates)}
             WHERE uuid = ${param_count}
             RETURNING uuid, idx, custom_id, collection_id, filename, content, page_content,
-                     content_with_image, mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
+                     content_without_image, mimetype, binary_hash, source_binary_hash, description, page_number, document_path, 
                      keywords, metadata, file_id, user_id, created_at, updated_at
         """
         result = await conn.fetchrow(query, *params)
